@@ -1,0 +1,69 @@
+"""Fast Walsh-Hadamard Transform with random sign flips (RHT).
+
+The randomized Hadamard transform isotropizes unit vectors so each
+coordinate becomes approximately i.i.d. Gaussian(0, 1/d), enabling
+distribution-agnostic scalar quantization.
+
+Algorithm: D·H·x / sqrt(d)
+  D — diagonal random ±1 matrix  (sign flip, seed-deterministic)
+  H — unnormalized Walsh-Hadamard matrix  (butterfly pattern)
+  x — input vector (zero-padded to next power of 2)
+
+Complexity: O(d log d) — no matrix multiplication.
+"""
+from __future__ import annotations
+
+from functools import lru_cache
+
+import numpy as np
+
+
+def _next_pow2(n: int) -> int:
+    if n <= 1:
+        return 1
+    return 1 << (n - 1).bit_length()
+
+
+def _fwht_inplace(x: np.ndarray) -> None:
+    """In-place Fast Walsh-Hadamard Transform (last axis, length = power of 2)."""
+    n = x.shape[-1]
+    h = 1
+    while h < n:
+        for i in range(0, n, h * 2):
+            a = x[..., i: i + h].copy()
+            b = x[..., i + h: i + 2 * h]
+            x[..., i: i + h] = a + b
+            x[..., i + h: i + 2 * h] = a - b
+        h *= 2
+
+
+@lru_cache(maxsize=64)
+def _signs(dim: int, seed: int) -> np.ndarray:
+    """Deterministic ±1 sign vector, shape (dim,), float32."""
+    rng = np.random.default_rng(seed)
+    return rng.choice(np.array([-1.0, 1.0], dtype=np.float32), size=dim)
+
+
+def padded_dim(dim: int) -> int:
+    """Return the WHT-padded dimension for a given embedding dimension."""
+    return _next_pow2(dim)
+
+
+def rht(x: np.ndarray, seed: int) -> np.ndarray:
+    """Randomized Hadamard Transform: D·H·x / sqrt(d).
+
+    Parameters
+    ----------
+    x : np.ndarray, shape (..., d)
+        Input vector(s).  ``d`` must already be a power of 2.
+    seed : int
+        Rotation seed.  Use the same seed consistently for an index.
+
+    Returns
+    -------
+    np.ndarray, same shape as x, float32.
+    """
+    d = x.shape[-1]
+    y = (x * _signs(d, seed)).astype(np.float32)
+    _fwht_inplace(y)
+    return y / np.sqrt(d)
