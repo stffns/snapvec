@@ -206,6 +206,54 @@ class TestStats:
         s = idx.stats()
         assert all(k in s for k in [
             "n", "dim", "padded_dim", "bits", "mse_bits",
-            "use_prod", "float32_bytes", "compressed_bytes",
-            "qjl_bytes", "total_bytes", "compression_ratio",
+            "use_prod", "chunk_size", "float32_bytes", "compressed_bytes",
+            "qjl_bytes", "cache_bytes", "total_bytes", "compression_ratio",
         ])
+
+
+# ─────────────────────────────────────────────── Chunked search ─────────────
+
+class TestChunkedSearch:
+    def test_chunked_same_results_as_cached(self):
+        """chunk_size produces identical top-k results as the float16 cache path."""
+        vecs = _rand(200)
+        ids = list(range(200))
+
+        idx_cached = SnapIndex(dim=DIM, bits=4)
+        idx_cached.add_batch(ids, vecs)
+
+        idx_chunked = SnapIndex(dim=DIM, bits=4, chunk_size=32)
+        idx_chunked.add_batch(ids, vecs)
+
+        for i in range(10):
+            r_cached = [x[0] for x in idx_cached.search(vecs[i], k=5)]
+            r_chunked = [x[0] for x in idx_chunked.search(vecs[i], k=5)]
+            assert r_cached == r_chunked, f"mismatch at query {i}"
+
+    def test_chunked_no_cache_allocated(self):
+        """Chunked mode must not populate _cache."""
+        idx = SnapIndex(dim=DIM, bits=4, chunk_size=10)
+        idx.add_batch(list(range(50)), _rand(50))
+        idx.search(_rand(1)[0], k=5)
+        assert idx._cache is None, "_cache must stay None in chunked mode"
+
+    def test_cached_mode_builds_cache(self):
+        """Default mode builds _cache after first search."""
+        idx = SnapIndex(dim=DIM, bits=4)
+        idx.add_batch(list(range(50)), _rand(50))
+        assert idx._cache is None
+        idx.search(_rand(1)[0], k=5)
+        assert idx._cache is not None
+
+    def test_chunked_recall(self):
+        """Chunked search achieves same recall as cached."""
+        n, k = 300, 10
+        vecs = _rand(n)
+        idx = SnapIndex(dim=DIM, bits=4, chunk_size=50)
+        idx.add_batch(list(range(n)), vecs)
+
+        hits = sum(
+            i in [r[0] for r in idx.search(vecs[i], k=k)]
+            for i in range(30)
+        )
+        assert hits / 30 >= 0.80

@@ -16,6 +16,7 @@ from __future__ import annotations
 from functools import lru_cache
 
 import numpy as np
+from numpy.typing import NDArray
 
 
 def _next_pow2(n: int) -> int:
@@ -24,7 +25,7 @@ def _next_pow2(n: int) -> int:
     return 1 << (n - 1).bit_length()
 
 
-def _fwht_inplace(x: np.ndarray) -> None:
+def _fwht_inplace(x: NDArray[np.float32]) -> None:
     """In-place Fast Walsh-Hadamard Transform (last axis, length = power of 2)."""
     n = x.shape[-1]
     h = 1
@@ -38,7 +39,7 @@ def _fwht_inplace(x: np.ndarray) -> None:
 
 
 @lru_cache(maxsize=64)
-def _signs(dim: int, seed: int) -> np.ndarray:
+def _signs(dim: int, seed: int) -> NDArray[np.float32]:
     """Deterministic ±1 sign vector, shape (dim,), float32."""
     rng = np.random.default_rng(seed)
     return rng.choice(np.array([-1.0, 1.0], dtype=np.float32), size=dim)
@@ -49,21 +50,22 @@ def padded_dim(dim: int) -> int:
     return _next_pow2(dim)
 
 
-def rht(x: np.ndarray, seed: int) -> np.ndarray:
+def rht(x: NDArray[np.float32], seed: int) -> NDArray[np.float32]:
     """Randomized Hadamard Transform: D·H·x / sqrt(d).
 
     Parameters
     ----------
-    x : np.ndarray, shape (..., d)
+    x : NDArray[np.float32], shape (..., d)
         Input vector(s).  ``d`` must already be a power of 2.
     seed : int
         Rotation seed.  Use the same seed consistently for an index.
 
     Returns
     -------
-    np.ndarray, same shape as x, float32.
+    NDArray[np.float32], same shape as x.
     """
     d = x.shape[-1]
-    y = (x * _signs(d, seed)).astype(np.float32)
+    y: NDArray[np.float32] = (x * _signs(d, seed)).astype(np.float32)
     _fwht_inplace(y)
-    return y / np.sqrt(d)
+    result: NDArray[np.float32] = (y / np.sqrt(d)).astype(np.float32)
+    return result

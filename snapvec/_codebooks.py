@@ -18,6 +18,7 @@ Zandieh et al. (2025). TurboQuant: Online Vector Quantization with
 from __future__ import annotations
 
 import numpy as np
+from numpy.typing import NDArray
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Precomputed Lloyd-Max codebooks for N(0,1), b ∈ {2, 3, 4}
@@ -60,7 +61,7 @@ _CODEBOOKS: dict[int, tuple[list[float], list[float]]] = {
 }
 
 
-def get_codebook(bits: int) -> tuple[np.ndarray, np.ndarray]:
+def get_codebook(bits: int) -> tuple[NDArray[np.float32], NDArray[np.float32]]:
     """Return (centroids, boundaries) for the given bit-width.
 
     Parameters
@@ -70,9 +71,9 @@ def get_codebook(bits: int) -> tuple[np.ndarray, np.ndarray]:
 
     Returns
     -------
-    centroids : np.ndarray, shape (2**bits,), float32
+    centroids : NDArray[np.float32], shape (2**bits,)
         Reconstruction values.
-    boundaries : np.ndarray, shape (2**bits - 1,), float32
+    boundaries : NDArray[np.float32], shape (2**bits - 1,)
         Decision thresholds for np.searchsorted.
     """
     if bits not in _CODEBOOKS:

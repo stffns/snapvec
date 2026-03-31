@@ -56,3 +56,24 @@ pythonpath = ["."]
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+warn_return_any = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+disallow_any_generics = false   # NDArray generics handled by numpy.typing
+plugins = ["numpy.typing.mypy_plugin"]
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false   # relaxed for test files
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-cov",
+    "mypy>=1.8",
+    "ruff",
+]

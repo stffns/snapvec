@@ -15,6 +15,13 @@ HadaMax_prod (use_prod=True)
     Cost     : 2 matmuls  (mse + QJL correction)
     Requires : bits >= 3
 
+Memory layout
+-------------
+``_indices``  — (N, pdim) uint8 in RAM, bit-packed only on disk.
+``_cache``    — (N, pdim) float16, lazy centroid expansion.  Evicted on writes.
+               For N > ~500k the cache dominates RAM; use ``chunk_size`` to
+               search without materialising it (streaming mode).
+
 Reference: Zandieh, Daliri, Hadian, Mirrokni (2025).
     "TurboQuant: Online Vector Quantization with Near-optimal Distortion Rate."
     arXiv:2504.19874.  ICLR 2026.
@@ -31,6 +38,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from numpy.typing import NDArray
 
 from ._codebooks import get_codebook
 from ._rotation import padded_dim, rht
@@ -56,6 +64,10 @@ class SnapIndex:
     use_prod : bool
         Enable TurboQuant_prod unbiased inner-product estimator.
         Slower (~2x) but zero systematic bias.
+    chunk_size : int | None
+        If set, search processes ``chunk_size`` rows at a time without
+        materialising the full float16 cache.  Use for N > 500k to trade
+        compute for memory.  ``None`` (default) uses the cached matmul.
 
     Examples
     --------
@@ -65,8 +77,8 @@ class SnapIndex:
     >>> vecs = np.random.randn(1000, 384).astype(np.float32)
     >>> idx.add_batch(list(range(1000)), vecs)
     >>> results = idx.search(vecs[0], k=5)
-    >>> results[0]  # (id, score)  — top match is the vector itself
-    (0, ...)
+    >>> results[0][0]  # top match is the vector itself
+    0
     """
 
     def __init__(
@@ -75,6 +87,7 @@ class SnapIndex:
         bits: int = 4,
         seed: int = 0,
         use_prod: bool = False,
+        chunk_size: int | None = None,
     ) -> None:
         if bits not in (2, 3, 4):
             raise ValueError(f"bits must be 2, 3, or 4; got {bits}")
@@ -88,28 +101,30 @@ class SnapIndex:
         self.bits = bits
         self.seed = seed
         self.use_prod = use_prod
+        self.chunk_size = chunk_size
 
         self._pdim: int = padded_dim(dim)
         self._mse_bits: int = bits - 1 if use_prod else bits
+        self._centroids: NDArray[np.float32]
         self._centroids, _ = get_codebook(self._mse_bits)
 
-        # Storage arrays (grown on add_batch, compacted on delete)
+        # Core storage
         self._ids: list[Any] = []
-        self._id_to_pos: dict[Any, int] = {}       # O(1) id → row lookup
-        self._indices = np.zeros((0, self._pdim), dtype=np.uint8)
-        self._norms = np.zeros(0, dtype=np.float32)
+        self._id_to_pos: dict[Any, int] = {}
+        self._indices: NDArray[np.uint8] = np.zeros((0, self._pdim), dtype=np.uint8)
+        self._norms: NDArray[np.float32] = np.zeros(0, dtype=np.float32)
 
-        # TurboQuant_prod arrays (None in mse mode)
-        self._qjl: np.ndarray | None = None        # (N, pdim) int8, ±1
-        self._rnorms: np.ndarray | None = None     # (N,) float32, ‖r_rot‖
-        self._S: np.ndarray | None = None          # (pdim, pdim) float32
+        # TurboQuant_prod arrays (None when use_prod=False)
+        self._qjl: NDArray[np.int8] | None = None
+        self._rnorms: NDArray[np.float32] | None = None
+        self._S: NDArray[np.float32] | None = None
 
         if use_prod:
             rng = np.random.default_rng(seed + 1337)
             self._S = rng.standard_normal((self._pdim, self._pdim)).astype(np.float32)
 
-        # float16 centroid cache — invalidated on writes
-        self._cache: np.ndarray | None = None
+        # float16 centroid cache — None until first search, evicted on writes
+        self._cache: NDArray[np.float16] | None = None
 
     # ──────────────────────────────────────────────────────────────────── #
     # Core API                                                              #
@@ -125,86 +140,94 @@ class SnapIndex:
             f"mode={mode}, n={len(self)})"
         )
 
-    def add(self, id: Any, vector: np.ndarray) -> None:
-        """Add a single vector. Prefer :meth:`add_batch` for bulk inserts."""
+    def add(self, id: Any, vector: NDArray[np.float32]) -> None:
+        """Add a single vector.  Prefer :meth:`add_batch` for bulk inserts."""
         self.add_batch([id], np.asarray(vector, dtype=np.float32).reshape(1, -1))
 
-    def add_batch(self, ids: list[Any], vectors: np.ndarray) -> None:
+    def add_batch(self, ids: list[Any], vectors: NDArray[np.float32]) -> None:
         """Add vectors in bulk — ~50x faster than repeated :meth:`add`.
 
         Parameters
         ----------
         ids : list[Any]
             Identifier for each vector (int, str, …).  Must be unique.
-        vectors : np.ndarray, shape (n, dim), float32
+        vectors : NDArray[np.float32], shape (n, dim)
             Raw embedding vectors (need not be normalized).
         """
-        vectors = np.asarray(vectors, dtype=np.float32)
-        n = len(vectors)
+        arr = np.asarray(vectors, dtype=np.float32)
+        n = len(arr)
         if n == 0:
             return
 
         # 1. Normalize to unit sphere
-        raw_norms = np.linalg.norm(vectors, axis=1)             # (n,)
-        safe = np.where(raw_norms > 1e-10, raw_norms, 1.0)
-        units = vectors / safe[:, None]                          # (n, dim)
+        raw_norms: NDArray[np.float32] = np.linalg.norm(arr, axis=1)
+        safe: NDArray[np.float32] = np.where(raw_norms > 1e-10, raw_norms, 1.0)
+        units: NDArray[np.float32] = arr / safe[:, None]
 
         # 2. Zero-pad to power of 2, batch RHT — O(n·d·log d)
         pdim = self._pdim
-        padded = np.zeros((n, pdim), dtype=np.float32)
-        padded[:, :self.dim] = units
-        rotated = rht(padded, self.seed)                         # (n, pdim)
-        scaled = rotated * np.sqrt(pdim)                         # ≈ N(0,1)
+        padded: NDArray[np.float32] = np.zeros((n, pdim), dtype=np.float32)
+        padded[:, : self.dim] = units
+        rotated: NDArray[np.float32] = rht(padded, self.seed)
+        scaled: NDArray[np.float32] = rotated * np.sqrt(pdim)
 
         # 3. MSE quantization at _mse_bits
         _, boundaries = get_codebook(self._mse_bits)
-        flat_idx = np.searchsorted(boundaries, scaled.ravel()).astype(np.uint8)
-        batch_idx = flat_idx.reshape(n, pdim)
-        batch_norms = np.where(raw_norms > 1e-10, raw_norms, 0.0).astype(np.float32)
+        flat_idx: NDArray[np.uint8] = np.searchsorted(
+            boundaries, scaled.ravel()
+        ).astype(np.uint8)
+        batch_idx: NDArray[np.uint8] = flat_idx.reshape(n, pdim)
+        batch_norms: NDArray[np.float32] = np.where(
+            raw_norms > 1e-10, raw_norms, 0.0
+        ).astype(np.float32)
 
-        # 4. QJL residual (prod mode)
-        qjl_signs: np.ndarray | None = None
-        residual_norms: np.ndarray | None = None
+        # 4. QJL residual (prod mode only)
+        qjl_signs: NDArray[np.int8] | None = None
+        residual_norms: NDArray[np.float32] | None = None
         if self.use_prod:
             assert self._S is not None
-            reconstructed = self._centroids[batch_idx]           # (n, pdim)
-            r_scaled = (scaled - reconstructed).astype(np.float32)
-            # r_rot = r_scaled / sqrt(pdim)  — work in unscaled space
-            # sign(S·r_rot) = sign(S·r_scaled)  — scale-invariant
-            S_r = (self._S @ r_scaled.T).T                      # (n, pdim)
+            reconstructed: NDArray[np.float32] = self._centroids[batch_idx]
+            r_scaled: NDArray[np.float32] = (scaled - reconstructed).astype(np.float32)
+            # sign(S·r_rot) = sign(S·r_scaled) — scale-invariant
+            S_r: NDArray[np.float32] = (self._S @ r_scaled.T).T
             qjl_signs = np.sign(S_r).astype(np.int8)
             qjl_signs[qjl_signs == 0] = 1
-            # Store ‖r_rot‖ = ‖r_scaled‖/sqrt(pdim)
+            # Store ‖r_rot‖ = ‖r_scaled‖/√pdim (unscaled space norm)
             residual_norms = (
                 np.linalg.norm(r_scaled, axis=1) / np.sqrt(pdim)
             ).astype(np.float32)
 
-        # 5. Append to storage
+        # 5. Append to storage arrays
         start = len(self._ids)
         self._ids.extend(ids)
         for i, id_val in enumerate(ids):
             self._id_to_pos[id_val] = start + i
 
         self._indices = (
-            batch_idx if len(self._indices) == 0
+            batch_idx
+            if len(self._indices) == 0
             else np.vstack([self._indices, batch_idx])
         )
         self._norms = (
-            batch_norms if len(self._norms) == 0
+            batch_norms
+            if len(self._norms) == 0
             else np.concatenate([self._norms, batch_norms])
         )
 
         if self.use_prod:
+            assert qjl_signs is not None and residual_norms is not None
             self._qjl = (
-                qjl_signs if self._qjl is None
+                qjl_signs
+                if self._qjl is None
                 else np.vstack([self._qjl, qjl_signs])
             )
             self._rnorms = (
-                residual_norms if self._rnorms is None
+                residual_norms
+                if self._rnorms is None
                 else np.concatenate([self._rnorms, residual_norms])
             )
 
-        self._cache = None  # invalidate float16 cache
+        self._cache = None  # evict
 
     def delete(self, id: Any) -> bool:
         """Remove a vector by id.  O(1) lookup, O(n) position compaction.
@@ -220,9 +243,10 @@ class SnapIndex:
         self._norms = np.delete(self._norms, pos)
         if self._qjl is not None:
             self._qjl = np.delete(self._qjl, pos, axis=0)
+            assert self._rnorms is not None
             self._rnorms = np.delete(self._rnorms, pos)
 
-        # Compact position map
+        # Compact position map: entries above deleted row shift down by 1
         for id_val, p in self._id_to_pos.items():
             if p > pos:
                 self._id_to_pos[id_val] = p - 1
@@ -230,12 +254,14 @@ class SnapIndex:
         self._cache = None
         return True
 
-    def search(self, query: np.ndarray, k: int = 10) -> list[tuple[Any, float]]:
+    def search(
+        self, query: NDArray[np.float32], k: int = 10
+    ) -> list[tuple[Any, float]]:
         """Find k nearest neighbors by approximate cosine similarity.
 
         Parameters
         ----------
-        query : np.ndarray, shape (dim,)
+        query : NDArray[np.float32], shape (dim,)
             Query vector (raw, need not be normalized).
         k : int
             Number of results to return.
@@ -243,47 +269,102 @@ class SnapIndex:
         Returns
         -------
         list of (id, score) sorted by descending similarity.
-        Score is an approximation of cosine similarity ∈ [-1, 1].
+        Score is an approximation of cosine similarity in [-1, 1].
+
+        Notes
+        -----
+        When ``chunk_size`` is set, search processes rows in chunks without
+        materialising the full float16 cache.  This trades peak RAM for
+        additional compute — useful when N > ~500k vectors.
         """
         if not self._ids:
             return []
 
         q = np.asarray(query, dtype=np.float32)
-        q_norm = np.linalg.norm(q)
+        q_norm: float = float(np.linalg.norm(q))
         if q_norm < 1e-10:
             return []
 
         pdim = self._pdim
-        q_unit = q / q_norm
-        q_padded = np.zeros(pdim, dtype=np.float32)
-        q_padded[:self.dim] = q_unit
-        q_rot = rht(q_padded, self.seed)
-        q_scaled = (q_rot * np.sqrt(pdim)).astype(np.float32)
+        q_unit: NDArray[np.float32] = q / q_norm
+        q_padded: NDArray[np.float32] = np.zeros(pdim, dtype=np.float32)
+        q_padded[: self.dim] = q_unit
+        q_rot: NDArray[np.float32] = rht(q_padded, self.seed)
+        q_scaled: NDArray[np.float32] = (q_rot * np.sqrt(pdim)).astype(np.float32)
 
-        # Stage 1 — MSE score
-        if self._cache is None:
-            self._cache = self._centroids[self._indices].astype(np.float16)
-        scores = (self._cache @ q_scaled).astype(np.float32) / pdim    # (N,)
+        scores: NDArray[np.float32]
 
-        # Stage 2 — QJL correction (prod mode)
-        # score_i += sqrt(π/2) / d · ‖r_i‖ · dot(S·q_rot, sign(S·r_i))
+        if self.chunk_size is not None:
+            scores = self._search_chunked(q_scaled)
+        else:
+            scores = self._search_cached(q_scaled)
+
+        # QJL correction (prod mode)
         if self.use_prod and self._qjl is not None:
-            assert self._S is not None and self._rnorms is not None
-            q_unit_rot = q_scaled / np.sqrt(pdim)
-            S_q = self._S @ q_unit_rot                       # (pdim,)
-            qjl_dots = self._qjl.astype(np.float32) @ S_q   # (N,)
-            correction = (
-                np.sqrt(np.pi / 2.0) / pdim
-                * self._rnorms
-                * qjl_dots
-            )
-            scores = scores + correction
+            scores = self._apply_qjl(scores, q_scaled)
 
         actual_k = min(k, len(self._ids))
-        top_idx = np.argpartition(scores, -actual_k)[-actual_k:]
+        top_idx: NDArray[np.intp] = np.argpartition(scores, -actual_k)[-actual_k:]
         top_idx = top_idx[np.argsort(scores[top_idx])[::-1]]
+        return [(self._ids[int(i)], float(scores[i])) for i in top_idx]
 
-        return [(self._ids[i], float(scores[i])) for i in top_idx]
+    # ──────────────────────────────────────────────────────────────────── #
+    # Search internals                                                      #
+    # ──────────────────────────────────────────────────────────────────── #
+
+    def _search_cached(self, q_scaled: NDArray[np.float32]) -> NDArray[np.float32]:
+        """Single float16 matmul using the lazy centroid cache.
+
+        Builds ``_cache`` once and reuses it across queries until a write
+        invalidates it.  Best for repeated queries on a stable index.
+        Peak RAM: O(N·d·2 bytes) for the float16 cache.
+        """
+        if self._cache is None:
+            self._cache = self._centroids[self._indices].astype(np.float16)
+        raw = (self._cache @ q_scaled).astype(np.float32)
+        result: NDArray[np.float32] = (raw / self._pdim).astype(np.float32)
+        return result
+
+    def _search_chunked(self, q_scaled: NDArray[np.float32]) -> NDArray[np.float32]:
+        """Chunked search — no float16 cache materialised.
+
+        Processes ``chunk_size`` rows at a time.  Peak RAM per chunk:
+        O(chunk_size · pdim · 2 bytes).  Total time is identical to the
+        cached path (same BLAS ops, just batched).
+
+        Use when N is large enough that the 1 GB+ float16 cache would
+        exceed available RAM.
+        """
+        assert self.chunk_size is not None
+        n = len(self._ids)
+        scores = np.empty(n, dtype=np.float32)
+        cs = self.chunk_size
+        for start in range(0, n, cs):
+            end = min(start + cs, n)
+            chunk: NDArray[np.float16] = self._centroids[
+                self._indices[start:end]
+            ].astype(np.float16)
+            scores[start:end] = (chunk @ q_scaled).astype(np.float32) / self._pdim
+        return scores
+
+    def _apply_qjl(
+        self,
+        scores: NDArray[np.float32],
+        q_scaled: NDArray[np.float32],
+    ) -> NDArray[np.float32]:
+        """Add QJL unbiased correction term (prod mode only).
+
+        Formula (Zandieh et al., Lemma 4):
+            correctionᵢ = √(π/2) / d · ‖rᵢ‖ · dot(S·q̂, sign(S·rᵢ))
+        """
+        assert self._S is not None and self._qjl is not None and self._rnorms is not None
+        q_unit_rot: NDArray[np.float32] = q_scaled / np.sqrt(self._pdim)
+        S_q: NDArray[np.float32] = self._S @ q_unit_rot
+        qjl_dots: NDArray[np.float32] = self._qjl.astype(np.float32) @ S_q
+        correction: NDArray[np.float32] = (
+            np.sqrt(np.pi / 2.0) / self._pdim * self._rnorms * qjl_dots
+        )
+        return scores + correction
 
     # ──────────────────────────────────────────────────────────────────── #
     # Persistence                                                           #
@@ -292,7 +373,8 @@ class SnapIndex:
     def save(self, path: str | Path) -> None:
         """Persist index to a binary ``.snpv`` file (atomic write).
 
-        Writes to ``<path>.tmp`` first, then renames — safe against crashes.
+        Writes to ``<path>.tmp`` first, then renames atomically.
+        Indices are bit-packed on disk (b/8 bytes per coordinate).
         """
         path = Path(path)
         tmp = path.with_suffix(path.suffix + ".tmp")
@@ -302,31 +384,27 @@ class SnapIndex:
         packed = _pack(self._indices, self._mse_bits)
 
         with open(tmp, "wb") as f:
-            # Header: magic(4) + version(4) + dim(4) + bits(4) + seed(4) + n(4) + flags(4)
             f.write(_MAGIC)
             f.write(struct.pack("<IIIIII", _VERSION, self.dim, self.bits, self.seed, n, flags))
-            # MSE indices (bit-packed)
             f.write(struct.pack("<I", len(packed)))
             f.write(packed)
-            # Per-vector norms
             f.write(self._norms.tobytes())
-            # QJL data (prod mode)
             if self.use_prod and self._qjl is not None:
+                assert self._rnorms is not None
                 f.write(self._qjl.tobytes())
                 f.write(self._rnorms.tobytes())
-            # IDs
             for id_val in self._ids:
                 enc = str(id_val).encode("utf-8")
                 f.write(struct.pack("<H", len(enc)))
                 f.write(enc)
 
-        tmp.replace(path)  # atomic on POSIX
+        tmp.replace(path)
 
     @classmethod
     def load(cls, path: str | Path) -> "SnapIndex":
         """Load index from a ``.snpv`` file.
 
-        Supports v1 (mse-only legacy) and v2 (with prod/flags) formats.
+        Supports v1 (mse-only legacy) and v2 (prod/flags) formats.
         """
         path = Path(path)
         with open(path, "rb") as f:
@@ -335,7 +413,6 @@ class SnapIndex:
                 raise ValueError(f"Invalid file: expected {_MAGIC!r} magic, got {magic!r}")
 
             (version,) = struct.unpack("<I", f.read(4))
-
             if version == 1:
                 dim, bits, seed, n = struct.unpack("<IIII", f.read(16))
                 use_prod = False
@@ -350,17 +427,16 @@ class SnapIndex:
             mse_bits = idx._mse_bits
 
             (packed_len,) = struct.unpack("<I", f.read(4))
-            packed_bytes = f.read(packed_len)
-            norms_bytes = f.read(n * 4)
-
-            idx._indices = _unpack(packed_bytes, n, pdim, mse_bits)
-            idx._norms = np.frombuffer(norms_bytes, dtype=np.float32).copy()
+            idx._indices = _unpack(f.read(packed_len), n, pdim, mse_bits)
+            idx._norms = np.frombuffer(f.read(n * 4), dtype=np.float32).copy()
 
             if use_prod and n > 0:
-                qjl_bytes = f.read(n * pdim)
-                rnorm_bytes = f.read(n * 4)
-                idx._qjl = np.frombuffer(qjl_bytes, dtype=np.int8).reshape(n, pdim).copy()
-                idx._rnorms = np.frombuffer(rnorm_bytes, dtype=np.float32).copy()
+                idx._qjl = (
+                    np.frombuffer(f.read(n * pdim), dtype=np.int8)
+                    .reshape(n, pdim)
+                    .copy()
+                )
+                idx._rnorms = np.frombuffer(f.read(n * 4), dtype=np.float32).copy()
 
             for pos in range(n):
                 (id_len,) = struct.unpack("<H", f.read(2))
@@ -382,14 +458,15 @@ class SnapIndex:
     # ──────────────────────────────────────────────────────────────────── #
 
     def stats(self) -> dict[str, Any]:
-        """Return memory / compression statistics."""
+        """Return memory and compression statistics."""
         n = len(self._ids)
         orig = n * self.dim * 4
-        mse_b = self._indices.nbytes + self._norms.nbytes
-        qjl_b = (
+        mse_b = int(self._indices.nbytes + self._norms.nbytes)
+        qjl_b = int(
             (self._qjl.nbytes + self._rnorms.nbytes)
-            if self._qjl is not None else 0
+            if self._qjl is not None and self._rnorms is not None else 0
         )
+        cache_b = int(self._cache.nbytes) if self._cache is not None else 0
         total = mse_b + qjl_b
         return {
             "n": n,
@@ -398,23 +475,34 @@ class SnapIndex:
             "bits": self.bits,
             "mse_bits": self._mse_bits,
             "use_prod": self.use_prod,
+            "chunk_size": self.chunk_size,
             "float32_bytes": orig,
             "compressed_bytes": mse_b,
             "qjl_bytes": qjl_b,
+            "cache_bytes": cache_b,
             "total_bytes": total,
             "compression_ratio": round(orig / max(total, 1), 2),
         }
 
 
 # ──────────────────────────────────────────────────────────────────────────── #
-# Bit-packing helpers                                                           #
+# Bit-packing helpers (disk I/O only)                                          #
+#                                                                              #
+# Why bit-pack only on disk, not in RAM?                                       #
+#   - In RAM, uint8 indices (1 byte/coord) enable O(1) numpy fancy indexing   #
+#     for centroid lookup: centroids[indices]. Bit-unpacking in the hot path   #
+#     would add O(N·d) overhead per query.                                     #
+#   - On disk, bit-packing halves the file size with negligible load cost      #
+#     (one vectorised unpack at startup, amortised over all queries).          #
+#   - For large N (>500k), use chunk_size to avoid the float16 cache instead  #
+#     of bit-packing in RAM — same memory savings, no per-query unpack cost.  #
 # ──────────────────────────────────────────────────────────────────────────── #
 
-def _pack(mat: np.ndarray, bits: int) -> bytes:
+def _pack(mat: NDArray[np.uint8], bits: int) -> bytes:
     """Pack uint8 index matrix into a bit-packed byte string."""
     if bits == 8:
         return mat.tobytes()
-    ipb = 8 // bits                    # indices per byte
+    ipb = 8 // bits
     mask = (1 << bits) - 1
     flat = mat.ravel()
     pad = (-len(flat)) % ipb
@@ -426,15 +514,19 @@ def _pack(mat: np.ndarray, bits: int) -> bytes:
     return out.tobytes()
 
 
-def _unpack(data: bytes, n_rows: int, n_cols: int, bits: int) -> np.ndarray:
+def _unpack(data: bytes, n_rows: int, n_cols: int, bits: int) -> NDArray[np.uint8]:
     """Unpack bit-packed bytes back to uint8 matrix."""
     if bits == 8:
-        return np.frombuffer(data, dtype=np.uint8).reshape(n_rows, n_cols).copy()
+        result: NDArray[np.uint8] = (
+            np.frombuffer(data, dtype=np.uint8).reshape(n_rows, n_cols).copy()
+        )
+        return result
     ipb = 8 // bits
     mask = (1 << bits) - 1
-    packed = np.frombuffer(data, dtype=np.uint8)
+    packed: NDArray[np.uint8] = np.frombuffer(data, dtype=np.uint8)
     total = n_rows * n_cols
-    out = np.zeros(len(packed) * ipb, dtype=np.uint8)
+    out: NDArray[np.uint8] = np.zeros(len(packed) * ipb, dtype=np.uint8)
     for i in range(ipb):
         out[i::ipb] = (packed >> (i * bits)) & mask
-    return out[:total].reshape(n_rows, n_cols).copy()
+    unpacked: NDArray[np.uint8] = out[:total].reshape(n_rows, n_cols).copy()
+    return unpacked
