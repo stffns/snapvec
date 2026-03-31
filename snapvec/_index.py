@@ -255,7 +255,10 @@ class SnapIndex:
         return True
 
     def search(
-        self, query: NDArray[np.float32], k: int = 10
+        self,
+        query: NDArray[np.float32],
+        k: int = 10,
+        filter_ids: set[Any] | None = None,
     ) -> list[tuple[Any, float]]:
         """Find k nearest neighbors by approximate cosine similarity.
 
@@ -265,6 +268,10 @@ class SnapIndex:
             Query vector (raw, need not be normalized).
         k : int
             Number of results to return.
+        filter_ids : set | None
+            If provided, restrict search to this subset of ids.
+            Uses O(1) dict lookups — cost is O(|filter_ids| · d) instead
+            of O(N · d).  Useful for collection/partition filtering.
 
         Returns
         -------
@@ -292,28 +299,53 @@ class SnapIndex:
         q_rot: NDArray[np.float32] = rht(q_padded, self.seed)
         q_scaled: NDArray[np.float32] = (q_rot * np.sqrt(pdim)).astype(np.float32)
 
-        scores: NDArray[np.float32]
-
-        if self.chunk_size is not None:
-            scores = self._search_chunked(q_scaled)
+        # Resolve filter_ids → sorted row positions (O(|filter_ids|))
+        if filter_ids is not None:
+            rows: NDArray[np.intp] = np.array(
+                [self._id_to_pos[i] for i in filter_ids if i in self._id_to_pos],
+                dtype=np.intp,
+            )
+            if len(rows) == 0:
+                return []
+            rows.sort()  # contiguous access is faster for cache/chunked
+            active_ids = [self._ids[r] for r in rows]
+            indices = self._indices[rows]
+            qjl = self._qjl[rows] if self._qjl is not None else None
+            rnorms = self._rnorms[rows] if self._rnorms is not None else None
         else:
+            rows = np.arange(len(self._ids), dtype=np.intp)
+            active_ids = self._ids
+            indices = self._indices
+            qjl = self._qjl
+            rnorms = self._rnorms
+
+        scores: NDArray[np.float32]
+        if self.chunk_size is not None:
+            scores = self._search_chunked_indices(indices, q_scaled)
+        elif filter_ids is None:
+            # Full scan — use lazy float16 cache (built once, reused across queries)
             scores = self._search_cached(q_scaled)
+        else:
+            # Filtered subset — skip cache, compute directly on the slice
+            expanded: NDArray[np.float16] = self._centroids[indices].astype(np.float16)
+            raw = (expanded @ q_scaled).astype(np.float32)
+            scores = (raw / pdim).astype(np.float32)
 
         # QJL correction (prod mode)
-        if self.use_prod and self._qjl is not None:
-            scores = self._apply_qjl(scores, q_scaled)
+        if self.use_prod and qjl is not None and rnorms is not None:
+            scores = self._apply_qjl_arrays(scores, q_scaled, qjl, rnorms)
 
-        actual_k = min(k, len(self._ids))
+        actual_k = min(k, len(active_ids))
         top_idx: NDArray[np.intp] = np.argpartition(scores, -actual_k)[-actual_k:]
         top_idx = top_idx[np.argsort(scores[top_idx])[::-1]]
-        return [(self._ids[int(i)], float(scores[i])) for i in top_idx]
+        return [(active_ids[int(i)], float(scores[i])) for i in top_idx]
 
     # ──────────────────────────────────────────────────────────────────── #
     # Search internals                                                      #
     # ──────────────────────────────────────────────────────────────────── #
 
     def _search_cached(self, q_scaled: NDArray[np.float32]) -> NDArray[np.float32]:
-        """Single float16 matmul using the lazy centroid cache.
+        """Single float16 matmul using the lazy centroid cache (full index).
 
         Builds ``_cache`` once and reuses it across queries until a write
         invalidates it.  Best for repeated queries on a stable index.
@@ -325,44 +357,48 @@ class SnapIndex:
         result: NDArray[np.float32] = (raw / self._pdim).astype(np.float32)
         return result
 
-    def _search_chunked(self, q_scaled: NDArray[np.float32]) -> NDArray[np.float32]:
-        """Chunked search — no float16 cache materialised.
+    def _search_chunked_indices(
+        self,
+        indices: NDArray[np.uint8],
+        q_scaled: NDArray[np.float32],
+    ) -> NDArray[np.float32]:
+        """Chunked search over arbitrary index rows — no cache materialised.
 
-        Processes ``chunk_size`` rows at a time.  Peak RAM per chunk:
-        O(chunk_size · pdim · 2 bytes).  Total time is identical to the
-        cached path (same BLAS ops, just batched).
-
-        Use when N is large enough that the 1 GB+ float16 cache would
-        exceed available RAM.
+        Processes ``chunk_size`` rows at a time.  Works for both the full
+        index and filtered subsets (``filter_ids``).
         """
         assert self.chunk_size is not None
-        n = len(self._ids)
+        n = len(indices)
         scores = np.empty(n, dtype=np.float32)
         cs = self.chunk_size
         for start in range(0, n, cs):
             end = min(start + cs, n)
             chunk: NDArray[np.float16] = self._centroids[
-                self._indices[start:end]
+                indices[start:end]
             ].astype(np.float16)
             scores[start:end] = (chunk @ q_scaled).astype(np.float32) / self._pdim
         return scores
 
-    def _apply_qjl(
+    def _apply_qjl_arrays(
         self,
         scores: NDArray[np.float32],
         q_scaled: NDArray[np.float32],
+        qjl: NDArray[np.int8],
+        rnorms: NDArray[np.float32],
     ) -> NDArray[np.float32]:
         """Add QJL unbiased correction term (prod mode only).
 
         Formula (Zandieh et al., Lemma 4):
             correctionᵢ = √(π/2) / d · ‖rᵢ‖ · dot(S·q̂, sign(S·rᵢ))
+
+        Accepts explicit qjl/rnorms arrays to support filtered subsets.
         """
-        assert self._S is not None and self._qjl is not None and self._rnorms is not None
+        assert self._S is not None
         q_unit_rot: NDArray[np.float32] = q_scaled / np.sqrt(self._pdim)
         S_q: NDArray[np.float32] = self._S @ q_unit_rot
-        qjl_dots: NDArray[np.float32] = self._qjl.astype(np.float32) @ S_q
+        qjl_dots: NDArray[np.float32] = qjl.astype(np.float32) @ S_q
         correction: NDArray[np.float32] = (
-            np.sqrt(np.pi / 2.0) / self._pdim * self._rnorms * qjl_dots
+            np.sqrt(np.pi / 2.0) / self._pdim * rnorms * qjl_dots
         )
         return scores + correction
 

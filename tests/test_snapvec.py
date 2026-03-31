@@ -257,3 +257,68 @@ class TestChunkedSearch:
             for i in range(30)
         )
         assert hits / 30 >= 0.80
+
+
+# ─────────────────────────────────────────────── Pre-filtering ───────────────
+
+class TestFilterIds:
+    def test_filter_restricts_results(self):
+        """Results must only contain ids from filter_ids."""
+        vecs = _rand(100)
+        idx = SnapIndex(dim=DIM, bits=4)
+        idx.add_batch(list(range(100)), vecs)
+
+        allowed = set(range(0, 50))
+        results = idx.search(vecs[0], k=10, filter_ids=allowed)
+        assert all(r[0] in allowed for r in results)
+
+    def test_filter_finds_target_in_minority(self):
+        """Even with 1 valid id in 200, it must be found."""
+        vecs = _rand(200)
+        idx = SnapIndex(dim=DIM, bits=4)
+        idx.add_batch(list(range(200)), vecs)
+
+        results = idx.search(vecs[42], k=5, filter_ids={42})
+        assert len(results) == 1
+        assert results[0][0] == 42
+
+    def test_filter_empty_set_returns_empty(self):
+        idx = SnapIndex(dim=DIM, bits=4)
+        idx.add_batch(list(range(10)), _rand(10))
+        results = idx.search(_rand(1)[0], k=5, filter_ids=set())
+        assert results == []
+
+    def test_filter_unknown_ids_ignored(self):
+        """IDs not in the index are silently ignored."""
+        idx = SnapIndex(dim=DIM, bits=4)
+        idx.add_batch([1, 2, 3], _rand(3))
+        results = idx.search(_rand(1)[0], k=5, filter_ids={1, 999, 1000})
+        assert all(r[0] in {1} for r in results)
+
+    def test_filter_none_is_full_scan(self):
+        """filter_ids=None must behave identically to no filter."""
+        vecs = _rand(50)
+        idx = SnapIndex(dim=DIM, bits=4)
+        idx.add_batch(list(range(50)), vecs)
+        r1 = idx.search(vecs[0], k=5)
+        r2 = idx.search(vecs[0], k=5, filter_ids=None)
+        assert r1 == r2
+
+    def test_filter_with_string_ids(self):
+        """filter_ids works with string ids."""
+        vecs = _rand(20)
+        ids = [f"doc_{i}" for i in range(20)]
+        idx = SnapIndex(dim=DIM, bits=4)
+        idx.add_batch(ids, vecs)
+        allowed = {f"doc_{i}" for i in range(10)}
+        results = idx.search(vecs[0], k=5, filter_ids=allowed)
+        assert all(r[0] in allowed for r in results)
+
+    def test_filter_with_chunk_size(self):
+        """filter_ids works correctly in chunked mode."""
+        vecs = _rand(100)
+        idx = SnapIndex(dim=DIM, bits=4, chunk_size=20)
+        idx.add_batch(list(range(100)), vecs)
+        allowed = set(range(50, 100))
+        results = idx.search(vecs[75], k=5, filter_ids=allowed)
+        assert all(r[0] in allowed for r in results)

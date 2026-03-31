@@ -16,5 +16,5 @@ from ._index import SnapIndex
 from ._codebooks import get_codebook
 from ._rotation import rht, padded_dim
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"
 __all__ = ["SnapIndex", "get_codebook", "rht", "padded_dim"]
