@@ -482,7 +482,12 @@ class SnapIndex:
         assert self._S is not None
         q_unit_rot: NDArray[np.float32] = q_scaled / np.sqrt(self._pdim)
         S_q: NDArray[np.float32] = self._S @ q_unit_rot
-        qjl_dots: NDArray[np.float32] = qjl.astype(np.float32) @ S_q
+
+        # ⚡ Bolt Optimization: Use `np.inner` instead of `.astype(np.float32) @`
+        # Using `np.inner` delegates mixed-type int8/float32 math directly to C,
+        # avoiding the creation of an O(N * d) float32 copy of the `qjl` matrix in memory.
+        qjl_dots: NDArray[np.float32] = np.inner(qjl, S_q)
+
         correction: NDArray[np.float32] = (
             np.sqrt(np.pi / 2.0) / self._pdim * rnorms * qjl_dots
         )
