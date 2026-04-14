@@ -371,31 +371,14 @@ class SnapIndex:
         if not self._ids:
             return []
 
-        q = np.asarray(query, dtype=np.float32)
-        q_norm: float = float(np.linalg.norm(q))
-        if q_norm < 1e-10:
+        q_scaled = self._prepare_query(query)
+        if q_scaled is None:
             return []
 
-        pdim = self._pdim
-        q_unit: NDArray[np.float32] = q / q_norm
-        q_padded: NDArray[np.float32] = np.zeros(pdim, dtype=np.float32)
-        q_padded[: self.dim] = q_unit
-        q_rot: NDArray[np.float32] = rht(q_padded, self.seed)
-        q_scaled: NDArray[np.float32] = (q_rot * np.sqrt(pdim)).astype(np.float32)
-
-        # Resolve filter_ids → sorted row positions (O(|filter_ids|))
         if filter_ids is not None:
-            rows: NDArray[np.intp] = np.array(
-                [self._id_to_pos[i] for i in filter_ids if i in self._id_to_pos],
-                dtype=np.intp,
-            )
-            if len(rows) == 0:
+            active_ids, packed_slice, qjl, rnorms = self._resolve_filter(filter_ids)
+            if not active_ids:
                 return []
-            rows.sort()  # contiguous access is faster for cache/chunked
-            active_ids = [self._ids[r] for r in rows]
-            packed_slice = self._indices[rows]
-            qjl = self._qjl[rows] if self._qjl is not None else None
-            rnorms = self._rnorms[rows] if self._rnorms is not None else None
         else:
             active_ids = self._ids
             packed_slice = self._indices
@@ -413,20 +396,62 @@ class SnapIndex:
             indices = self._unpack_to_indices(packed_slice)
             expanded: NDArray[np.float16] = self._centroids[indices].astype(np.float16)
             raw = (expanded @ q_scaled).astype(np.float32)
-            scores = (raw / pdim).astype(np.float32)
+            scores = (raw / self._pdim).astype(np.float32)
 
         # QJL correction (prod mode)
         if self.use_prod and qjl is not None and rnorms is not None:
             scores = self._apply_qjl_arrays(scores, q_scaled, qjl, rnorms)
 
-        actual_k = min(k, len(active_ids))
-        top_idx: NDArray[np.intp] = np.argpartition(scores, -actual_k)[-actual_k:]
-        top_idx = top_idx[np.argsort(scores[top_idx])[::-1]]
-        return [(active_ids[int(i)], float(scores[i])) for i in top_idx]
+        return self._top_k(scores, active_ids, k)
 
     # ──────────────────────────────────────────────────────────────────── #
     # Search internals                                                      #
     # ──────────────────────────────────────────────────────────────────── #
+
+    def _prepare_query(self, query: NDArray[np.float32]) -> NDArray[np.float32] | None:
+        """Normalize, pad, rotate, and scale the query vector."""
+        q = np.asarray(query, dtype=np.float32)
+        q_norm: float = float(np.linalg.norm(q))
+        if q_norm < 1e-10:
+            return None
+
+        pdim = self._pdim
+        q_unit: NDArray[np.float32] = q / q_norm
+        q_padded: NDArray[np.float32] = np.zeros(pdim, dtype=np.float32)
+        q_padded[: self.dim] = q_unit
+        q_rot: NDArray[np.float32] = rht(q_padded, self.seed)
+        return (q_rot * np.sqrt(pdim)).astype(np.float32)
+
+    def _resolve_filter(
+        self, filter_ids: set[Any]
+    ) -> tuple[
+        list[Any],
+        NDArray[np.uint8],
+        NDArray[np.int8] | None,
+        NDArray[np.float32] | None,
+    ]:
+        """Resolve filter_ids to subset arrays."""
+        rows: NDArray[np.intp] = np.array(
+            [self._id_to_pos[i] for i in filter_ids if i in self._id_to_pos],
+            dtype=np.intp,
+        )
+        if len(rows) == 0:
+            return [], np.zeros((0, self._indices.shape[1]), dtype=np.uint8), None, None
+        rows.sort()  # contiguous access is faster for cache/chunked
+        active_ids = [self._ids[r] for r in rows]
+        packed_slice = self._indices[rows]
+        qjl = self._qjl[rows] if self._qjl is not None else None
+        rnorms = self._rnorms[rows] if self._rnorms is not None else None
+        return active_ids, packed_slice, qjl, rnorms
+
+    def _top_k(
+        self, scores: NDArray[np.float32], active_ids: list[Any], k: int
+    ) -> list[tuple[Any, float]]:
+        """Return the top k results sorted by descending score."""
+        actual_k = min(k, len(active_ids))
+        top_idx: NDArray[np.intp] = np.argpartition(scores, -actual_k)[-actual_k:]
+        top_idx = top_idx[np.argsort(scores[top_idx])[::-1]]
+        return [(active_ids[int(i)], float(scores[i])) for i in top_idx]
 
     def _search_cached(self, q_scaled: NDArray[np.float32]) -> NDArray[np.float32]:
         """Single float16 matmul using the lazy centroid cache (full index).
