@@ -2,7 +2,10 @@
 
 **Fast compressed approximate nearest-neighbor search.  Pure NumPy.  No heavy dependencies.**
 
-`snapvec` implements the TurboQuant compression pipeline — randomized Hadamard transform followed by optimal Gaussian scalar quantization (Lloyd-Max) — as a self-contained Python library for embedding vector search.  It achieves **~6× / ~8× / ~12× compression at 4-bit / 3-bit / 2-bit** (disk and RAM match, thanks to tight bit-packing) with **>0.92 recall@10** against float32 brute-force, using only NumPy.
+`snapvec` ships **two high-performance compression pipelines** for embedding vector search:
+
+- **`SnapIndex`** — *training-free*.  Implements [TurboQuant](https://arxiv.org/abs/2504.19874) (randomized Hadamard transform + Lloyd-Max scalar quantization).  Works out-of-the-box on any vector distribution, no calibration or corpus sample required.  Best when the dataset is dynamic or unknown up front.  Achieves **~6× / ~8× / ~12× compression at 4 / 3 / 2 bits** with **>0.92 recall@10** on real embeddings.
+- **`PQSnapIndex`** — *train-once*.  Product Quantization with k-means-learned per-subspace codebooks.  Delivers **+15–18 pp recall@10** over `SnapIndex` at matched bytes/vec on modern LLM embeddings, and opens ultra-compressed operating points (16 / 32 / 64 B/vec) that scalar quantization cannot reach.  Cost is one offline `fit(sample)` call on a representative slice of your corpus.
 
 ```
 pip install snapvec
@@ -17,16 +20,27 @@ pip install snapvec
 | Willing to pay a bit of accuracy for ~25% more compression vs 4-bit | **`bits=3`** | 7.8× smaller, now tightly packed — a genuine middle ground as of v0.3.0 |
 | Need unbiased inner-product estimates (KV-cache, attention) | **`bits=3` or `4` + `use_prod=True`** | QJL correction at the cost of ~2× search latency |
 
-### `SnapIndex` vs `PQSnapIndex`: training-free vs trained
+### Which Index should I use?
 
-`snapvec` ships two index types with different trade-offs:
+| If you need… | Use | Why |
+|---|---|---|
+| **Maximum accuracy on LLM embeddings** | `PQSnapIndex` | Exploits the embedding model's natural cluster structure.  128 B/vec with PQ matches 256 B/vec with scalar Lloyd-Max on BGE-small. |
+| **Zero setup / plug-and-play** | `SnapIndex` | No `.fit()` needed.  RHT Gaussianizes any distribution, so fixed Lloyd-Max codebooks work out of the box. |
+| **Massive scale (N ≫ 10⁶)** | `PQSnapIndex` | Enables 16 B and 32 B per-vector modes that are not physically reachable with scalar quantization (`SnapIndex` floors at ~128 B/vec for 384-dim embeddings). |
+| **Unbiased inner-product estimates** (KV-cache, attention) | `SnapIndex(use_prod=True)` | QJL residual correction; see the TurboQuant_prod section below. |
 
-| Use | Index | Training | Typical gain |
-|-----|-------|----------|--------------|
-| Drop-in, no offline step, stable across datasets | **`SnapIndex`** (RHT + fixed Lloyd-Max codebooks) | none | baseline |
-| You can spend a few seconds training codebooks on a sample of your corpus | **`PQSnapIndex`** (product quantization, k-means codebooks) | one-off `fit(sample)` | +10–18 pp recall@10 at matched bytes/vec on real embeddings |
+On BGE-small / SciFact (3-seed mean, disjoint train/eval split):
 
-On BGE-small / SciFact, `PQSnapIndex(M=192, K=256, normalized=True)` reaches recall@10 = 0.94 at **192 B/vec** — `SnapIndex(bits=3)` delivers 0.78 at the same storage; `PQSnapIndex(M=128, K=256, normalized=True)` matches `SnapIndex(bits=4)` at half the bytes per vector. With `normalized=False` each vector carries an extra 4-byte float32 norm. See `experiments/bench_pq_scaleup_validation.py` for the full sweep (3 seeds, K ∈ {16, 64, 256}, disjoint train/eval split).
+| Mode | Bytes/vec | Recall@10 | Δ vs scalar baseline |
+|---|---|---|---|
+| `SnapIndex(bits=2)` | 128 + 4 | 0.686 | — |
+| `PQSnapIndex(M=128, K=256, normalized=True)` | 128 | **0.871** | **+18.5 pp** |
+| `SnapIndex(bits=3)` | 192 + 4 | 0.781 | — |
+| `PQSnapIndex(M=192, K=256, normalized=True)` | 192 | **0.937** | **+15.6 pp** |
+| `SnapIndex(bits=4)` | 256 + 4 | 0.870 | — |
+| `PQSnapIndex(M=256, K=256, use_rht=True)` | 256 | **0.948** | **+7.8 pp** |
+
+Full sweep in `experiments/bench_pq_scaleup_validation.py` (K ∈ {16, 64, 256}, 3 seeds, disjoint 2 000-vec train set).
 
 ---
 
@@ -72,6 +86,17 @@ idx2 = PQSnapIndex.load("my_index.snpq")
 ```
 
 Pick `PQSnapIndex` when you can afford the one-off `fit` step and want the recall lift documented above; pick `SnapIndex` when you need a truly training-free, drop-in index.
+
+### Why `PQSnapIndex` defaults to `use_rht=False`
+
+The Randomized Hadamard Transform (RHT) is essential for *scalar* quantization: it Gaussianizes each coordinate so that a single fixed Lloyd-Max codebook is optimal regardless of the input distribution.  That is the entire point of `SnapIndex`.
+
+For Product Quantization the same rotation is actively harmful:
+
+- **Structure preservation.**  PQ learns a codebook per subspace by finding clusters inside that subspace.  RHT spreads every coordinate's variance uniformly across the whole vector, which increases entropy per subspace and destroys the clustered geometry k-means is trying to exploit.
+- **Empirical cost.**  Turning the RHT off and running k-means on the raw embedding subspaces buys **+15.6 pp recall@10 at 192 B/vec** on BGE-small / SciFact (0.937 vs 0.781 for `SnapIndex(bits=3)`, and 0.781 vs 0.776 for PQ-with-RHT at the same storage).  Validated across K ∈ {16, 64, 256} with 3-seed mean and std ≤ 0.01.
+
+`use_rht=True` remains available for the rare cases where the embedding distribution is genuinely isotropic already, or for sanity-checking against the scalar pipeline.  See `experiments/bench_pq_no_rht_ablation.py` for the controlled A/B.
 
 ### Input dtype: pass `np.float32`
 
@@ -407,6 +432,15 @@ repr(idx)                                     # SnapIndex(dim=384, bits=4, mode=
 The same algorithm was published concurrently as "PolarQuant" at AISTATS 2026.
 Both names were already taken on PyPI; `snapvec` = **Hada**mard + Lloyd-**Max**,
 named after its two core operations.
+
+> **Note on `PQSnapIndex`.**  While `SnapIndex` follows the TurboQuant paper
+> strictly (RHT + Lloyd-Max), `PQSnapIndex` deliberately departs from that
+> pipeline: it skips the RHT and learns per-subspace k-means codebooks on the
+> raw embedding space, which lets it exploit the natural clustered structure
+> of modern LLM embeddings.  The trade-off is that a training-free guarantee
+> is replaced with a one-off `fit(sample)` call — in exchange for a strictly
+> better recall / storage Pareto frontier on the retrieval workloads we've
+> measured.  See the decision table at the top of this README.
 
 Key contributions of this implementation over the reference:
 
