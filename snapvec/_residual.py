@@ -23,6 +23,7 @@ already 12× compression vs float32 for a 6-bit combined rate.
 """
 from __future__ import annotations
 
+import os
 import struct
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,20 @@ from numpy.typing import NDArray
 
 from ._codebooks import get_codebook
 from ._rotation import padded_dim, rht
+
+
+_MAX_ID_BYTES = 0xFFFF  # file format stores id length as uint16
+
+
+def _decode_id(raw: str) -> Any:
+    """Round-trip numeric-looking ids back to int/float, matching SnapIndex."""
+    try:
+        return int(raw)
+    except ValueError:
+        try:
+            return float(raw)
+        except ValueError:
+            return raw
 
 
 # Empirical Lloyd-Max MSE on N(0, 1) at 2M samples — used to compute
@@ -112,13 +127,22 @@ class ResidualSnapIndex:
         self, ids: list[Any], vectors: NDArray[np.float32]
     ) -> None:
         arr = np.asarray(vectors, dtype=np.float32)
+        if arr.ndim != 2 or arr.shape[1] != self.dim:
+            raise ValueError(
+                f"vectors must be shape (n, {self.dim}); got {arr.shape}"
+            )
         n = len(arr)
+        if len(ids) != n:
+            raise ValueError(
+                f"ids and vectors must have the same length; "
+                f"got {len(ids)} ids and {n} vectors"
+            )
         if n == 0:
             return
 
         if self.normalized:
             units = arr
-            batch_norms = np.ones(n, dtype=np.float32)
+            batch_norms = None  # not stored in normalized mode
         else:
             raw_norms = np.linalg.norm(arr, axis=1)
             safe = np.where(raw_norms > 1e-10, raw_norms, 1.0)
@@ -149,11 +173,12 @@ class ResidualSnapIndex:
 
         self._codes1 = c1 if len(self._codes1) == 0 else np.vstack([self._codes1, c1])
         self._codes2 = c2 if len(self._codes2) == 0 else np.vstack([self._codes2, c2])
-        self._norms = (
-            batch_norms
-            if len(self._norms) == 0
-            else np.concatenate([self._norms, batch_norms])
-        )
+        if batch_norms is not None:
+            self._norms = (
+                batch_norms
+                if len(self._norms) == 0
+                else np.concatenate([self._norms, batch_norms])
+            )
 
     # ──────────────────────────────────────────────────────────────── #
     # search                                                            #
@@ -183,6 +208,12 @@ class ResidualSnapIndex:
         """
         if not self._ids:
             return []
+        if k < 1:
+            raise ValueError(f"k must be >= 1; got {k}")
+        if rerank_M is not None and rerank_M < k:
+            raise ValueError(
+                f"rerank_M must be >= k; got rerank_M={rerank_M}, k={k}"
+            )
         q = np.asarray(query, dtype=np.float32)
         q_norm = float(np.linalg.norm(q))
         if q_norm < 1e-10:
@@ -263,12 +294,18 @@ class ResidualSnapIndex:
             if n > 0:
                 f.write(self._codes1.tobytes())
                 f.write(self._codes2.tobytes())
-                f.write(self._norms.tobytes())
+                if not self.normalized:
+                    f.write(self._norms.tobytes())
                 for id_val in self._ids:
                     s = str(id_val).encode("utf-8")
+                    if len(s) > _MAX_ID_BYTES:
+                        raise ValueError(
+                            f"id {id_val!r} encodes to {len(s)} UTF-8 bytes; "
+                            f"the file format stores id length as uint16 "
+                            f"(max {_MAX_ID_BYTES})"
+                        )
                     f.write(struct.pack("<H", len(s)))
                     f.write(s)
-        import os
         os.replace(tmp, path)
 
     @classmethod
@@ -285,13 +322,19 @@ class ResidualSnapIndex:
                 raise ValueError(f"unsupported .snpr version {version}")
             normalized = bool(flags & 1)
             idx = cls(dim=dim, b1=b1, b2=b2, seed=seed, normalized=normalized)
+            if pdim != idx._pdim:
+                raise ValueError(
+                    f"on-disk pdim={pdim} differs from computed pdim={idx._pdim} "
+                    f"for dim={dim}; file may be corrupted or from a future version"
+                )
             if n > 0:
                 idx._codes1 = np.frombuffer(f.read(n * pdim), dtype=np.uint8).reshape(n, pdim).copy()
                 idx._codes2 = np.frombuffer(f.read(n * pdim), dtype=np.uint8).reshape(n, pdim).copy()
-                idx._norms = np.frombuffer(f.read(n * 4), dtype=np.float32).copy()
+                if not normalized:
+                    idx._norms = np.frombuffer(f.read(n * 4), dtype=np.float32).copy()
                 idx._ids = []
                 for _ in range(n):
                     (ln,) = struct.unpack("<H", f.read(2))
-                    idx._ids.append(f.read(ln).decode("utf-8"))
+                    idx._ids.append(_decode_id(f.read(ln).decode("utf-8")))
                 idx._id_to_pos = {id_val: i for i, id_val in enumerate(idx._ids)}
         return idx

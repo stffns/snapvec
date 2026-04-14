@@ -119,3 +119,39 @@ def test_stats_shape() -> None:
     s = idx.stats()
     assert s["n"] == 10 and s["b1"] == 3 and s["b2"] == 3
     assert s["bytes_per_vec"] == 2 * s["padded_dim"]
+
+
+def test_numeric_id_roundtrip(tmp_path: Path) -> None:
+    """Numeric ids should survive save/load (matching SnapIndex behaviour)."""
+    corpus = _unit_gaussian(50, 64, seed=0)
+    idx = ResidualSnapIndex(dim=64, b1=3, b2=3, normalized=True)
+    idx.add_batch(list(range(50)), corpus)
+    path = tmp_path / "x.snpr"
+    idx.save(path)
+    reloaded = ResidualSnapIndex.load(path)
+    assert reloaded._ids[0] == 0 and isinstance(reloaded._ids[0], int)
+    assert reloaded._ids[-1] == 49
+
+
+def test_add_batch_validates_lengths() -> None:
+    idx = ResidualSnapIndex(dim=32, b1=3, b2=3, normalized=True)
+    with pytest.raises(ValueError, match="same length"):
+        idx.add_batch([0, 1], _unit_gaussian(3, 32))
+    with pytest.raises(ValueError, match="shape"):
+        idx.add_batch([0], np.zeros((1, 16), dtype=np.float32))
+
+
+def test_rerank_M_validation() -> None:
+    corpus = _unit_gaussian(100, 64, seed=0)
+    idx = ResidualSnapIndex(dim=64, b1=3, b2=3, normalized=True)
+    idx.add_batch(list(range(100)), corpus)
+    with pytest.raises(ValueError, match="rerank_M"):
+        idx.search(corpus[0], k=10, rerank_M=5)
+
+
+def test_id_too_long_raises(tmp_path: Path) -> None:
+    idx = ResidualSnapIndex(dim=32, b1=3, b2=3, normalized=True)
+    huge = "x" * 70000
+    idx.add_batch([huge], _unit_gaussian(1, 32))
+    with pytest.raises(ValueError, match="UTF-8 bytes"):
+        idx.save(tmp_path / "x.snpr")
