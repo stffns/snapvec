@@ -482,7 +482,7 @@ class SnapIndex:
         assert self._S is not None
         q_unit_rot: NDArray[np.float32] = q_scaled / np.sqrt(self._pdim)
         S_q: NDArray[np.float32] = self._S @ q_unit_rot
-        qjl_dots: NDArray[np.float32] = qjl.astype(np.float32) @ S_q
+        qjl_dots: NDArray[np.float32] = np.dot(qjl, S_q)
         correction: NDArray[np.float32] = (
             np.sqrt(np.pi / 2.0) / self._pdim * rnorms * qjl_dots
         )
