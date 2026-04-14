@@ -14,7 +14,14 @@ from __future__ import annotations
 
 from ._index import SnapIndex
 from ._codebooks import get_codebook
+from ._pq import PQSnapIndex
 from ._rotation import rht, padded_dim
 
 __version__ = "0.3.0"
-__all__ = ["SnapIndex", "get_codebook", "rht", "padded_dim"]
+__all__ = [
+    "SnapIndex",
+    "PQSnapIndex",
+    "get_codebook",
+    "rht",
+    "padded_dim",
+]

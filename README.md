@@ -17,6 +17,17 @@ pip install snapvec
 | Willing to pay a bit of accuracy for ~25% more compression vs 4-bit | **`bits=3`** | 7.8× smaller, now tightly packed — a genuine middle ground as of v0.3.0 |
 | Need unbiased inner-product estimates (KV-cache, attention) | **`bits=3` or `4` + `use_prod=True`** | QJL correction at the cost of ~2× search latency |
 
+### `SnapIndex` vs `PQSnapIndex`: training-free vs trained
+
+`snapvec` ships two index types with different trade-offs:
+
+| Use | Index | Training | Typical gain |
+|-----|-------|----------|--------------|
+| Drop-in, no offline step, stable across datasets | **`SnapIndex`** (RHT + fixed Lloyd-Max codebooks) | none | baseline |
+| You can spend a few seconds training codebooks on a sample of your corpus | **`PQSnapIndex`** (product quantization, k-means codebooks) | one-off `fit(sample)` | +10–18 pp recall@10 at matched bytes/vec on real embeddings |
+
+On BGE-small / SciFact, `PQSnapIndex(M=192, K=256)` reaches recall@10 = 0.94 at 192 B/vec — `SnapIndex(bits=3)` delivers 0.78 at the same storage; `PQSnapIndex(M=128, K=256)` matches `SnapIndex(bits=4)` at half the bytes per vector. See `experiments/bench_pq_scaleup_validation.py` for the full sweep (3 seeds, K ∈ {16, 64, 256}, disjoint train/eval split).
+
 ---
 
 ## Quick start
