@@ -314,7 +314,7 @@ class SnapIndex:
         self._cache = None  # evict
 
     def delete(self, id: Any) -> bool:
-        """Remove a vector by id.  O(1) lookup, O(n) position compaction.
+        """Remove a vector by id.  O(1) lookup, O(1) delete via swap-with-last.
 
         Returns True if the id was found and removed, False otherwise.
         """
@@ -322,18 +322,27 @@ class SnapIndex:
             return False
 
         pos = self._id_to_pos.pop(id)
-        self._ids.pop(pos)
-        self._indices = np.delete(self._indices, pos, axis=0)
-        self._norms = np.delete(self._norms, pos)
-        if self._qjl is not None:
-            self._qjl = np.delete(self._qjl, pos, axis=0)
-            assert self._rnorms is not None
-            self._rnorms = np.delete(self._rnorms, pos)
+        last_pos = len(self._ids) - 1
 
-        # Compact position map: entries above deleted row shift down by 1
-        for id_val, p in self._id_to_pos.items():
-            if p > pos:
-                self._id_to_pos[id_val] = p - 1
+        if pos != last_pos:
+            last_id = self._ids[last_pos]
+            self._ids[pos] = last_id
+            self._id_to_pos[last_id] = pos
+
+            self._indices[pos] = self._indices[last_pos]
+            self._norms[pos] = self._norms[last_pos]
+            if self._qjl is not None:
+                self._qjl[pos] = self._qjl[last_pos]
+                assert self._rnorms is not None
+                self._rnorms[pos] = self._rnorms[last_pos]
+
+        self._ids.pop()
+        self._indices = self._indices[:-1]
+        self._norms = self._norms[:-1]
+        if self._qjl is not None:
+            self._qjl = self._qjl[:-1]
+            assert self._rnorms is not None
+            self._rnorms = self._rnorms[:-1]
 
         self._cache = None
         return True
