@@ -31,7 +31,11 @@ def build_index(
     the caller wires up).
     """
     root = Path(root).resolve()
-    md_files = sorted(p for p in root.rglob("*.md") if p.is_file())
+    md_files = sorted(
+        p for p in root.rglob("*.md")
+        if p.is_file()
+        and not any(part.startswith(".") for part in p.relative_to(root).parts)
+    )
     records: list[dict] = []
     for path in md_files:
         parsed = parse_markdown(path)

@@ -50,17 +50,22 @@ class Store:
     def load(self) -> None:
         self.idx = SnapIndex.load(self.index_path)
         self.meta = {
-            int(k): v for k, v in json.loads(self.meta_path.read_text()).items()
+            int(k): v
+            for k, v in json.loads(
+                self.meta_path.read_text(encoding="utf-8")
+            ).items()
         }
         self.dim = self.idx.dim
         self.bits = self.idx.bits
 
     def save(self) -> None:
-        assert self.idx is not None
+        if self.idx is None:
+            raise RuntimeError("Store not initialised; call create() or load() first")
         self.root.mkdir(parents=True, exist_ok=True)
         self.idx.save(self.index_path)
         self.meta_path.write_text(
-            json.dumps({str(k): v for k, v in self.meta.items()})
+            json.dumps({str(k): v for k, v in self.meta.items()}),
+            encoding="utf-8",
         )
 
     def clear(self) -> None:
@@ -75,8 +80,10 @@ class Store:
         embeddings: NDArray[np.float32],
         records: list[dict[str, Any]],
     ) -> None:
-        assert self.idx is not None
-        assert len(embeddings) == len(records)
+        if self.idx is None:
+            raise RuntimeError("Store not initialised; call create() or load() first")
+        if len(embeddings) != len(records):
+            raise ValueError("embeddings and records must have the same length")
         start = len(self.idx)
         ids = list(range(start, start + len(records)))
         self.idx.add_batch(ids, embeddings)
@@ -96,7 +103,8 @@ class Store:
         that subset.  This is where ``filter_ids`` earns its keep — for a
         "find in #work notes only" query we skip the other 99% of the index.
         """
-        assert self.idx is not None
+        if self.idx is None:
+            raise RuntimeError("Store not initialised; call create() or load() first")
         if tag_filter:
             allowed = {
                 i for i, m in self.meta.items()
@@ -112,13 +120,16 @@ class Store:
     # ---------- diagnostics -------------------------------------------------
 
     def stats(self) -> dict[str, Any]:
-        assert self.idx is not None
+        if self.idx is None:
+            raise RuntimeError("Store not initialised; call create() or load() first")
         s = dict(self.idx.stats())
         s["docs"] = len({m["path"] for m in self.meta.values()})
         s["chunks"] = len(self.meta)
-        # Disk footprint of the on-disk artefacts (if saved)
-        s["disk_bytes"] = (
-            self.index_path.stat().st_size + self.meta_path.stat().st_size
-            if self.exists() else 0
-        )
+        disk_bytes = 0
+        for p in (self.index_path, self.meta_path):
+            try:
+                disk_bytes += p.stat().st_size
+            except FileNotFoundError:
+                pass
+        s["disk_bytes"] = disk_bytes
         return s

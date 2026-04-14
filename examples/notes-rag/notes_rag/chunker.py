@@ -47,7 +47,7 @@ def _extract_tags(frontmatter: str) -> list[str]:
 
 def parse_markdown(path: Path) -> dict:
     """Read ``path`` and return ``{"text": body, "tags": [...]}``."""
-    raw = path.read_text(encoding="utf-8", errors="ignore")
+    raw = path.read_text(encoding="utf-8", errors="ignore").replace("\r\n", "\n")
     tags: list[str] = []
     body = raw
     m = _FRONTMATTER_RE.match(raw)
