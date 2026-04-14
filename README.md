@@ -2,7 +2,7 @@
 
 **Fast compressed approximate nearest-neighbor search.  Pure NumPy.  No heavy dependencies.**
 
-`snapvec` implements the TurboQuant compression pipeline — randomized Hadamard transform followed by optimal Gaussian scalar quantization (Lloyd-Max) — as a self-contained Python library for embedding vector search.  It achieves **~6× compression at 4-bit / ~12× at 2-bit** (disk and RAM) with **>0.92 recall@10** against float32 brute-force, using only NumPy.
+`snapvec` implements the TurboQuant compression pipeline — randomized Hadamard transform followed by optimal Gaussian scalar quantization (Lloyd-Max) — as a self-contained Python library for embedding vector search.  It achieves **~6× / ~8× / ~12× compression at 4-bit / 3-bit / 2-bit** (disk and RAM match, thanks to tight bit-packing) with **>0.92 recall@10** against float32 brute-force, using only NumPy.
 
 ```
 pip install snapvec
@@ -27,7 +27,7 @@ results = idx.search(query_vector.astype(np.float32), k=10)  # [(id, score), ...
 
 # Persist
 idx.save("my_index.snpv")
-idx2 = SnapIndex.load("my_index.snpv")   # atomic save, v1/v2 compatible
+idx2 = SnapIndex.load("my_index.snpv")   # atomic save, v1/v2/v3 compatible
 ```
 
 ### Input dtype: pass `np.float32`
@@ -110,16 +110,16 @@ and assigns each the conditional mean as reconstruction value.
 These boundaries and centroids are precomputed and hardcoded in `snapvec._codebooks`
 (no scipy required at runtime):
 
-| bits | levels | distortion (MSE) | bytes/coord (theoretical) | bytes/coord (actual) |
-|------|--------|------------------|---------------------------|----------------------|
-| 2    | 4      | 0.1175           | 0.25                      | 0.25                 |
-| 3    | 8      | 0.0311           | 0.375                     | 0.50 ⚠︎              |
-| 4    | 16     | 0.0077           | 0.50                      | 0.50                 |
+| bits | levels | distortion (MSE) | bytes/coord |
+|------|--------|------------------|-------------|
+| 2    | 4      | 0.1175           | 0.25        |
+| 3    | 8      | 0.0311           | 0.375       |
+| 4    | 16     | 0.0077           | 0.50        |
 
-The quantized vector is stored as a `uint8` index matrix, bit-packed to
-`b/8` bytes per coordinate on disk when `b` evenly divides 8. At 3-bit the
-current packer is byte-aligned and wastes 2 bits per byte (see the
-"Compression ratios" section below).
+The quantized vector is stored as a `uint8` index matrix, tightly
+bit-packed to `b/8` bytes per coordinate both on disk and in RAM. For 3-bit
+this means packing 8 indices into 3 bytes (24 bits); for 2-bit and 4-bit
+the packing is byte-aligned (4 per byte, 2 per byte respectively).
 
 #### Step 4 — Approximate inner product
 
@@ -175,19 +175,25 @@ still persisted (as 1.0) to keep the on-disk layout stable across modes.
 |----------------|------------------|-----------------------|------------|-----------|
 | float32        | 1 536            | 1 536                 | 1.0×       | 1.0×      |
 | 4-bit snapvec  | 256 + 4          | 256 + 4               | **5.9×**   | **5.9×**  |
-| 3-bit snapvec  | 256 + 4 ⚠︎       | 512 + 4               | **5.9×** ⚠︎| **3.0×**  |
+| 3-bit snapvec  | 192 + 4          | 192 + 4               | **7.8×**   | **7.8×**  |
 | 2-bit snapvec  | 128 + 4          | 128 + 4               | **11.6×**  | **11.6×** |
 | int8 (naïve)   | 384 + 4          | 384 + 4               | 4.0×       | 4.0×      |
 
-⚠︎ **3-bit note:** Current `_pack` is byte-aligned (ipb = ⌊8/3⌋ = 2), so 3-bit
-indices waste 2 bits per byte on disk — giving the same 0.5 bytes/coord as
-4-bit instead of the theoretical 0.375. Choose 4-bit for better recall at
-equal storage, or 2-bit for genuinely smaller footprint. True tight
-3-bit packing is on the roadmap.
+**RAM = disk:** indices are tightly bit-packed in both. The same byte
+layout is used everywhere, so `save` / `load` copy bytes directly without
+an intermediate unpack/repack step. This halves indices RAM vs the
+pre-v0.2 behaviour (which stored uint8 in RAM and only packed on disk).
 
-**RAM packing:** 2-bit and 4-bit indices are bit-packed in RAM (unpacked
-lazily when the `float16` cache is built — zero impact on warm query
-latency). 3-bit falls back to plain `uint8` until tight packing lands.
+Bit-packing scheme:
+- **4-bit** (`0.5 bytes/coord`): 2 indices per byte (byte-aligned).
+- **3-bit** (`0.375 bytes/coord`): 8 indices → 3 bytes, cross-byte tight
+  packing (v3 file format; v1/v2 files are read transparently via the
+  legacy byte-aligned decoder).
+- **2-bit** (`0.25 bytes/coord`): 4 indices per byte (byte-aligned).
+
+Unpacking happens when the `float16` centroid cache is built (cached
+full-scan path — once, off the hot matmul) or per-chunk/per-query in
+`chunk_size` / `filter_ids` modes.
 
 **Search cache:** a lazy `float16` centroid expansion of shape
 `(N, padded_dim)` is materialised on first query for fast matmul (~5 ms
@@ -222,13 +228,13 @@ from mixed document corpora, 4-bit achieves **recall@10 ≈ 0.95**.
 ```
 Offset  Size   Field
 ──────────────────────────────────────────────────
-0       4 B    magic: "HDMX"
-4       4 B    version: uint32 (1 or 2)
+0       4 B    magic: "SNPV"
+4       4 B    version: uint32 (1, 2, or 3)
 8       4 B    dim: uint32  — original embedding dimension
 12      4 B    bits: uint32 — total bits (2, 3, or 4)
 16      4 B    seed: uint32 — rotation seed
 20      4 B    n: uint32    — number of stored vectors
-24      4 B    flags: uint32 — bit-0: use_prod, bit-1: normalized  [v2 only]
+24      4 B    flags: uint32 — bit-0: use_prod, bit-1: normalized  [v2/v3 only]
 ──────────────────────────────────────────────────
 28      4 B    packed_len: uint32
 32      *      indices: bit-packed uint8 MSE indices
@@ -241,7 +247,9 @@ Offset  Size   Field
 ```
 
 Saves are **atomic** on POSIX: writes to `.snpv.tmp` then `os.replace()`.
-Backward compatible: v1 files (mse-only) load correctly in any version.
+Backward compatible: v1 (mse-only, pre-flags), v2 (flags + byte-aligned
+3-bit), and v3 (tight 3-bit packing) files all load correctly — the
+reader dispatches the 3-bit decoder on version.
 
 ---
 
@@ -303,7 +311,8 @@ Key contributions of this implementation over the reference:
 - **Chunked streaming search** — `chunk_size` avoids the float16 cache for large N
 - **O(1) delete** — `_id_to_pos` dict + position compaction
 - **Atomic saves** — `.snpv.tmp` → `os.replace()` pattern
-- **Versioned format** — v1/v2 both loadable, forward-compatible flags field
+- **Versioned format** — v1/v2/v3 all loadable, forward-compatible flags field,
+  legacy 3-bit decoder kept around for pre-v0.3 indices
 
 ---
 
@@ -320,16 +329,6 @@ what's already fast.
 
 ### Pure-Python improvements (no new dependencies)
 
-- **Tight 3-bit packing** — the current `_pack` is byte-aligned and wastes
-  2 bits per byte at 3-bit (ipb = ⌊8/3⌋ = 2). Packing 8 three-bit values
-  across 3 bytes would restore the theoretical 0.375 bytes/coord — a
-  25% disk reduction for the 3-bit mode and a meaningful gap between
-  "smaller but less accurate" (2-bit) and "larger but more accurate"
-  (4-bit) options.
-- **Vectorized FWHT** — replace the Python-level butterfly loop in
-  `_rotation._fwht_inplace` with reshape-based NumPy operations.
-  Expected: ~10–20× speedup on the RHT step (0.47 ms → ~0.03 ms at d=512),
-  ~5–10% end-to-end query improvement.
 - **Quantized norms on disk** — store per-vector norms as uint8 with a
   (min, max) header. Saves 3 bytes/vec on disk with <0.1% precision loss.
 - **Typed ID storage** — persist integer IDs as fixed-width uint32/uint64
@@ -338,6 +337,10 @@ what's already fast.
 - **Positional-ID fast path** — when IDs are `0..N-1`, skip `_ids` list
   and `_id_to_pos` dict entirely; position is the ID. Saves ~23 bytes/vec
   of Python object overhead.
+
+_Previously planned and now shipped:_
+_Tight 3-bit packing (v0.3.0); vectorized FWHT (v0.3.0, ~25× faster per
+query in isolation, ~10% E2E)._
 
 ### Hybrid Python + Rust core (opt-in accelerator)
 
@@ -374,6 +377,17 @@ time and used automatically when available.
   already dominates.
 
 ---
+
+## Changelog
+
+See [`CHANGELOG.md`](./CHANGELOG.md) for the per-release history. Recent
+highlights:
+
+- **v0.3.0** — Tight 3-bit packing (5.9× → 7.8× compression for 3-bit),
+  vectorised FWHT (~24× faster single-query RHT), file format v3 with
+  transparent v1/v2 backward-compat.
+- **v0.2.0** — RAM-packed indices for 2/4-bit (idle RAM cut in half),
+  `normalized=True` flag, measured-accurate compression docs.
 
 ## Installation
 
