@@ -50,6 +50,29 @@ idx.save("my_index.snpv")
 idx2 = SnapIndex.load("my_index.snpv")   # atomic save, v1/v2/v3 compatible
 ```
 
+### Quick start — `PQSnapIndex` (higher recall, one-off `fit`)
+
+```python
+from snapvec import PQSnapIndex
+
+# Build: choose M subspaces dividing dim (or pdim if use_rht=True) and K ≤ 256 centroids.
+# Storage = M bytes/vec when normalized=True (+4 bytes otherwise).
+idx = PQSnapIndex(dim=384, M=192, K=256, normalized=True)   # 192 B/vec
+
+# Train once on a representative sample (≥ K, ~10–50 k is plenty)
+idx.fit(training_vectors.astype(np.float32))
+
+# Index and query exactly like SnapIndex
+idx.add_batch(ids=list(range(N)), vectors=corpus.astype(np.float32))
+results = idx.search(query.astype(np.float32), k=10)
+
+# Persist to its own format (atomic save, .snpq magic SNPQ v1)
+idx.save("my_index.snpq")
+idx2 = PQSnapIndex.load("my_index.snpq")
+```
+
+Pick `PQSnapIndex` when you can afford the one-off `fit` step and want the recall lift documented above; pick `SnapIndex` when you need a truly training-free, drop-in index.
+
 ### Input dtype: pass `np.float32`
 
 `add_batch`, `add`, and `search` accept any array-like input but cast
