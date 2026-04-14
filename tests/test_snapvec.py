@@ -259,7 +259,7 @@ class TestChunkedSearch:
         assert hits / 30 >= 0.80
 
 
-# ─────────────────────────────────────────────── Pre-filtering ───────────────
+# ─────────────────────────────────────────────── RAM bit-packing ────────────
 
 class TestRamPacking:
     """RAM bit-packing: indices stored at 4 bits/coord (2 per byte) at 4-bit."""
@@ -312,6 +312,8 @@ class TestRamPacking:
         assert s["ram_packed"] is True
 
 
+# ─────────────────────────────────────────────── Normalized mode ────────────
+
 class TestNormalized:
     """normalized=True: skip norm computation for pre-normalized inputs."""
 
@@ -355,6 +357,8 @@ class TestNormalized:
             rb = [x[0] for x in b.search(vecs[i], k=5)]
             assert ra == rb
 
+
+# ─────────────────────────────────────────────── Pre-filtering ───────────────
 
 class TestFilterIds:
     def test_filter_restricts_results(self):

@@ -17,9 +17,11 @@ HadaMax_prod (use_prod=True)
 
 Memory layout
 -------------
-``_indices``  — RAM-packed uint8 when mse_bits divides 8 (2-bit or 4-bit
-               modes): 2 indices per byte at 4-bit, 4 per byte at 2-bit.
-               Falls back to plain (N, pdim) uint8 at 3-bit.
+``_indices``  — RAM-packed uint8 when ``mse_bits`` divides 8: ``mse_bits`` = 4
+               gives 2 indices per byte, ``mse_bits`` = 2 gives 4 per byte.
+               Falls back to plain (N, pdim) uint8 when ``mse_bits`` = 3,
+               which occurs either as ``bits=3, use_prod=False`` or
+               ``bits=4, use_prod=True``.
 ``_cache``    — (N, pdim) float16, lazy centroid expansion.  Evicted on writes.
                For N > ~500k the cache dominates RAM; use ``chunk_size`` to
                search without materialising it (streaming mode).
@@ -216,7 +218,8 @@ class SnapIndex:
         if n == 0:
             return
 
-        # 1. Normalize to unit sphere
+        # 1. Normalize to unit sphere (skipped when self.normalized=True,
+        #    i.e. the caller guarantees inputs already have unit length)
         if self.normalized:
             units: NDArray[np.float32] = arr
             batch_norms: NDArray[np.float32] = np.ones(n, dtype=np.float32)
@@ -489,9 +492,13 @@ class SnapIndex:
         if self.normalized:
             flags |= _FLAG_NORMALIZED
 
-        # Unpack RAM indices before disk bit-packing
-        unpacked = self._unpack_to_indices()
-        packed = _pack(unpacked, self._mse_bits)
+        # When RAM is bit-packed, the layout already matches disk bit-packing
+        # byte-for-byte (C-order ravel of (N, pdim/ipb) uint8) — skip the
+        # unpack/repack round-trip entirely.
+        if self._can_pack:
+            packed = self._indices.tobytes()
+        else:
+            packed = _pack(self._indices, self._mse_bits)
 
         with open(tmp, "wb") as f:
             f.write(_MAGIC)
@@ -540,12 +547,16 @@ class SnapIndex:
             mse_bits = idx._mse_bits
 
             (packed_len,) = struct.unpack("<I", f.read(4))
-            unpacked = _unpack(f.read(packed_len), n, pdim, mse_bits)
-            # RAM-pack indices when possible
+            data = f.read(packed_len)
             if idx._can_pack:
-                idx._indices = idx._pack_matrix(unpacked)
+                # Disk bit-packing matches the RAM layout — read directly.
+                idx._indices = (
+                    np.frombuffer(data, dtype=np.uint8)
+                    .reshape(n, pdim // idx._ipb)
+                    .copy()
+                )
             else:
-                idx._indices = unpacked
+                idx._indices = _unpack(data, n, pdim, mse_bits)
             idx._norms = np.frombuffer(f.read(n * 4), dtype=np.float32).copy()
 
             if use_prod and n > 0:
@@ -617,10 +628,12 @@ class SnapIndex:
 #   - For large N (>500k), use chunk_size to avoid the float16 cache instead  #
 #     of bit-packing in RAM — same memory savings, no per-query unpack cost.  #
 #                                                                              #
-# UPDATE: RAM indices are now also bit-packed when mse_bits divides 8 (2-bit  #
-#   and 4-bit modes). Unpacking happens once when building the float16 cache  #
-#   — not on the hot matmul path. This halves the indices footprint with no   #
-#   impact on warm query latency.                                              #
+# UPDATE: RAM indices are now also bit-packed when ``mse_bits`` divides 8.   #
+#   In the cached full-scan path, unpacking happens once while building the   #
+#   float16 cache, so it is NOT on the hot matmul path — the warm-latency    #
+#   claim applies to that path only. In chunked and filtered paths           #
+#   (``chunk_size`` set, or ``filter_ids`` supplied) unpacking still runs    #
+#   per chunk / per query, so those paths pay the unpack cost each time.     #
 # ──────────────────────────────────────────────────────────────────────────── #
 
 def _pack(mat: NDArray[np.uint8], bits: int) -> bytes:
