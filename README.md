@@ -378,6 +378,17 @@ time and used automatically when available.
 
 ---
 
+## Changelog
+
+See [`CHANGELOG.md`](./CHANGELOG.md) for the per-release history. Recent
+highlights:
+
+- **v0.3.0** — Tight 3-bit packing (5.9× → 7.8× compression for 3-bit),
+  vectorised FWHT (~24× faster single-query RHT), file format v3 with
+  transparent v1/v2 backward-compat.
+- **v0.2.0** — RAM-packed indices for 2/4-bit (idle RAM cut in half),
+  `normalized=True` flag, measured-accurate compression docs.
+
 ## Installation
 
 ```bash

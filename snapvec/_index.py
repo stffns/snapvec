@@ -17,11 +17,11 @@ HadaMax_prod (use_prod=True)
 
 Memory layout
 -------------
-``_indices``  — RAM-packed uint8 when ``mse_bits`` divides 8: ``mse_bits`` = 4
-               gives 2 indices per byte, ``mse_bits`` = 2 gives 4 per byte.
-               Falls back to plain (N, pdim) uint8 when ``mse_bits`` = 3,
-               which occurs either as ``bits=3, use_prod=False`` or
-               ``bits=4, use_prod=True``.
+``_indices``  — bit-packed uint8 for all bit widths (both RAM and on disk).
+               At 4-bit: 2 indices per byte.  At 2-bit: 4 per byte.
+               At 3-bit: 8 indices are packed tightly across 3 bytes
+               (0.375 bytes/coord).  Since ``pdim`` is a power of 2 ≥ 8,
+               each row is byte-aligned and RAM layout == disk layout.
 ``_cache``    — (N, pdim) float16, lazy centroid expansion.  Evicted on writes.
                For N > ~500k the cache dominates RAM; use ``chunk_size`` to
                search without materialising it (streaming mode).
@@ -669,23 +669,31 @@ class SnapIndex:
 
 
 # ──────────────────────────────────────────────────────────────────────────── #
-# Bit-packing helpers (disk I/O only)                                          #
+# Bit-packing helpers                                                          #
 #                                                                              #
-# Why bit-pack only on disk, not in RAM?                                       #
-#   - In RAM, uint8 indices (1 byte/coord) enable O(1) numpy fancy indexing   #
-#     for centroid lookup: centroids[indices]. Bit-unpacking in the hot path   #
-#     would add O(N·d) overhead per query.                                     #
-#   - On disk, bit-packing halves the file size with negligible load cost      #
-#     (one vectorised unpack at startup, amortised over all queries).          #
-#   - For large N (>500k), use chunk_size to avoid the float16 cache instead  #
-#     of bit-packing in RAM — same memory savings, no per-query unpack cost.  #
+# Packing scheme per ``mse_bits`` (b):                                         #
+#   b = 2 : 4 indices / byte, byte-aligned          (0.25 bytes/coord)         #
+#   b = 3 : 8 indices / 3 bytes, cross-byte tight   (0.375 bytes/coord)        #
+#   b = 4 : 2 indices / byte, byte-aligned          (0.50 bytes/coord)         #
 #                                                                              #
-# UPDATE: RAM indices are now also bit-packed when ``mse_bits`` divides 8.   #
-#   In the cached full-scan path, unpacking happens once while building the   #
-#   float16 cache, so it is NOT on the hot matmul path — the warm-latency    #
-#   claim applies to that path only. In chunked and filtered paths           #
-#   (``chunk_size`` set, or ``filter_ids`` supplied) unpacking still runs    #
-#   per chunk / per query, so those paths pay the unpack cost each time.     #
+# Since ``pdim`` is always a power of 2 ≥ 8, ``pdim * b`` is divisible by 8    #
+# for all three cases — so rows are byte-aligned and the RAM-packed matrix    #
+# ``_indices`` has the same byte layout as the on-disk bit-packed stream.     #
+# ``save`` and ``load`` exploit this: indices are written / read with         #
+# ``tobytes()`` / ``np.frombuffer`` directly, with no unpack+repack trip.      #
+#                                                                              #
+# Unpack-to-uint8 happens in three places:                                     #
+#   (a) first cached search, when building the lazy float16 centroid matrix;  #
+#   (b) ``_search_chunked``, once per chunk of ``chunk_size`` rows;           #
+#   (c) ``search(filter_ids=...)``, once per query on the filtered slice.    #
+#                                                                              #
+# So the unpack is OFF the hot matmul path in the cached full-scan mode;      #
+# chunked and filtered paths pay it per chunk/query (still cheap: a few       #
+# vectorised NumPy shifts on small slices).                                   #
+#                                                                              #
+# The legacy (v1/v2) disk format used byte-aligned 3-bit packing (2 indices   #
+# per byte, wasting 2 bits per byte). ``_unpack(..., legacy_3bit=True)``     #
+# decodes that layout so pre-v0.3 files remain loadable.                     #
 # ──────────────────────────────────────────────────────────────────────────── #
 
 def _pack(mat: NDArray[np.uint8], bits: int) -> bytes:
