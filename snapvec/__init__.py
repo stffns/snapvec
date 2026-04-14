@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from ._codebooks import get_codebook
 from ._index import SnapIndex
+from ._ivfpq import IVFPQSnapIndex
 from ._pq import PQSnapIndex
 from ._residual import ResidualSnapIndex
 from ._rotation import padded_dim, rht
@@ -22,6 +23,7 @@ __version__ = "0.3.0"
 __all__ = [
     "SnapIndex",
     "PQSnapIndex",
+    "IVFPQSnapIndex",
     "ResidualSnapIndex",
     "get_codebook",
     "rht",
