@@ -37,6 +37,7 @@ from ._rotation import padded_dim, rht
 
 _MAGIC = b"SNPQ"
 _VERSION = 1
+_MAX_ID_BYTES = 0xFFFF  # file format stores id length as uint16
 
 # Flags bitfield
 _FLAG_NORMALIZED = 1 << 0
@@ -48,15 +49,36 @@ def _divisors(n: int, lo: int = 2, hi: int = 1024) -> list[int]:
     return [d for d in range(lo, min(n, hi) + 1) if n % d == 0]
 
 
+def _decode_id(raw: str) -> Any:
+    """Round-trip numeric-looking ids back to int/float, matching SnapIndex."""
+    try:
+        return int(raw)
+    except ValueError:
+        try:
+            return float(raw)
+        except ValueError:
+            return raw
+
+
 def _kmeans_pp_init(
     X: NDArray[np.float32], K: int, rng: np.random.Generator
 ) -> NDArray[np.float32]:
-    """K-means++ seeding on ``X`` with ``K`` centers."""
+    """K-means++ seeding on ``X`` with ``K`` centers.
+
+    Falls back to uniform sampling when every point is already zero-
+    distance from the selected centres — e.g. duplicated points or
+    fewer unique values than ``K``.  The guard prevents the
+    ``rng.choice(..., p=[0, 0, ...])`` ValueError.
+    """
     n = X.shape[0]
     centers = [X[int(rng.integers(n))]]
     d2 = ((X - centers[0]) ** 2).sum(1)
     for _ in range(1, K):
-        probs = d2 / (d2.sum() + 1e-12)
+        total = d2.sum()
+        if total > 1e-12:
+            probs = d2 / total
+        else:
+            probs = np.full(n, 1.0 / n)
         nxt = int(rng.choice(n, p=probs))
         centers.append(X[nxt])
         d2 = np.minimum(d2, ((X - centers[-1]) ** 2).sum(1))
@@ -171,7 +193,8 @@ class PQSnapIndex:
         """
         arr = np.asarray(X, dtype=np.float32)
         if self.normalized:
-            norms = np.ones(len(arr), dtype=np.float32)
+            # Skip norm storage entirely — scoring does not use them.
+            norms = np.empty(0, dtype=np.float32)
             units = arr
         else:
             raw = np.linalg.norm(arr, axis=1)
@@ -219,13 +242,18 @@ class PQSnapIndex:
         """Train per-subspace codebooks on ``training_vectors``.
 
         Must be called exactly once, before the first ``add`` /
-        ``add_batch``.  Calling ``fit`` after any vectors have been
-        indexed would invalidate their codes, so it raises.
+        ``add_batch``.  Calling ``fit`` a second time (whether or not
+        any vectors have been indexed) raises — double-fit would
+        silently overwrite the codebooks and, if any vectors had been
+        indexed, invalidate their codes.
         """
-        if len(self._ids) > 0:
+        if self._fitted:
+            # Covers both re-fit with or without prior add_batch — either
+            # would overwrite the codebooks and (silently) invalidate any
+            # codes already written.
             raise RuntimeError(
-                "fit() called after add_batch(); this would invalidate "
-                "existing codes.  Create a fresh PQSnapIndex instead."
+                "fit() already called; create a fresh PQSnapIndex to "
+                "train on different data."
             )
         arr = np.asarray(training_vectors, dtype=np.float32)
         if len(arr) < self.K:
@@ -256,10 +284,17 @@ class PQSnapIndex:
     ) -> None:
         self._require_fitted()
         arr = np.asarray(vectors, dtype=np.float32)
+        if arr.ndim != 2 or arr.shape[1] != self.dim:
+            raise ValueError(
+                f"vectors must be shape (n, {self.dim}); got {arr.shape}"
+            )
         if len(arr) == 0:
             return
         if len(ids) != len(arr):
-            raise ValueError("len(ids) != len(vectors)")
+            raise ValueError(
+                f"ids and vectors must have the same length; "
+                f"got {len(ids)} ids and {len(arr)} vectors"
+            )
 
         pre, norms = self._preprocess(arr)
         codes = np.empty((len(arr), self.M), dtype=np.uint8)
@@ -279,9 +314,11 @@ class PQSnapIndex:
         self._codes = (
             codes if len(self._codes) == 0 else np.vstack([self._codes, codes])
         )
-        self._norms = (
-            norms if len(self._norms) == 0 else np.concatenate([self._norms, norms])
-        )
+        if not self.normalized:
+            self._norms = (
+                norms if len(self._norms) == 0
+                else np.concatenate([self._norms, norms])
+            )
 
     def delete(self, id: Any) -> bool:
         if id not in self._id_to_pos:
@@ -289,7 +326,8 @@ class PQSnapIndex:
         pos = self._id_to_pos.pop(id)
         self._ids.pop(pos)
         self._codes = np.delete(self._codes, pos, axis=0)
-        self._norms = np.delete(self._norms, pos)
+        if not self.normalized:
+            self._norms = np.delete(self._norms, pos)
         for k, p in self._id_to_pos.items():
             if p > pos:
                 self._id_to_pos[k] = p - 1
@@ -303,9 +341,14 @@ class PQSnapIndex:
         self, query: NDArray[np.float32], k: int = 10,
     ) -> list[tuple[Any, float]]:
         self._require_fitted()
+        if k < 1:
+            raise ValueError(f"k must be >= 1; got {k}")
         if not self._ids:
             return []
-        q_pre = self._preprocess_single(np.asarray(query, dtype=np.float32))
+        q = np.asarray(query, dtype=np.float32)
+        if float(np.linalg.norm(q)) < 1e-10:
+            return []
+        q_pre = self._preprocess_single(q)
 
         # LUT[j, k] = ⟨q_j, c_{j,k}⟩
         lut = np.empty((self.M, self.K), dtype=np.float32)
@@ -387,9 +430,16 @@ class PQSnapIndex:
             f.write(self._codebooks.tobytes())
             if n > 0:
                 f.write(self._codes.tobytes())
-                f.write(self._norms.tobytes())
+                if not self.normalized:
+                    f.write(self._norms.tobytes())
                 for id_val in self._ids:
                     s = str(id_val).encode("utf-8")
+                    if len(s) > _MAX_ID_BYTES:
+                        raise ValueError(
+                            f"id {id_val!r} encodes to {len(s)} UTF-8 bytes; "
+                            f"the file format stores id length as uint16 "
+                            f"(max {_MAX_ID_BYTES})"
+                        )
                     f.write(struct.pack("<H", len(s)))
                     f.write(s)
         os.replace(tmp, path)
@@ -412,6 +462,13 @@ class PQSnapIndex:
                 dim=dim, M=M, K=K, seed=seed,
                 normalized=normalized, use_rht=use_rht,
             )
+            if pdim != idx._pdim or d_sub != idx._d_sub:
+                raise ValueError(
+                    f"on-disk pdim={pdim}, d_sub={d_sub} differ from computed "
+                    f"pdim={idx._pdim}, d_sub={idx._d_sub} for "
+                    f"(dim={dim}, M={M}, use_rht={use_rht}); file may be "
+                    f"corrupted or from a future version"
+                )
             idx._codebooks = (
                 np.frombuffer(f.read(M * K * d_sub * 4), dtype=np.float32)
                 .reshape(M, K, d_sub)
@@ -424,10 +481,11 @@ class PQSnapIndex:
                     .reshape(n, M)
                     .copy()
                 )
-                idx._norms = np.frombuffer(f.read(n * 4), dtype=np.float32).copy()
+                if not normalized:
+                    idx._norms = np.frombuffer(f.read(n * 4), dtype=np.float32).copy()
                 idx._ids = []
                 for _ in range(n):
                     (ln,) = struct.unpack("<H", f.read(2))
-                    idx._ids.append(f.read(ln).decode("utf-8"))
+                    idx._ids.append(_decode_id(f.read(ln).decode("utf-8")))
                 idx._id_to_pos = {v: i for i, v in enumerate(idx._ids)}
         return idx

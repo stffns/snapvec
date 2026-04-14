@@ -57,7 +57,7 @@ def test_fit_after_add_raises() -> None:
     idx = PQSnapIndex(dim=32, M=8, K=16, normalized=True)
     idx.fit(corpus)
     idx.add_batch([0], corpus[:1])
-    with pytest.raises(RuntimeError, match="invalidate"):
+    with pytest.raises(RuntimeError, match="already called"):
         idx.fit(corpus)
 
 
@@ -143,7 +143,6 @@ def test_use_rht_toggle(use_rht: bool) -> None:
 
 
 def test_unnormalized_scoring_scales_with_norm() -> None:
-    rng = np.random.default_rng(9)
     base = _clustered(60, 32, seed=21)
     scales = np.linspace(0.5, 5.0, 60).astype(np.float32)
     corpus = base * scales[:, None]
@@ -179,4 +178,73 @@ def test_stats_shape() -> None:
     s = idx.stats()
     assert s["n"] == 50 and s["M"] == 8 and s["K"] == 16
     assert s["d_sub"] == 4 and s["fitted"] is True
-    assert s["bytes_per_vec"] == 8  # M uint8 codes, normalized=True
+    assert s["bytes_per_vec"] == 8  # M uint8 codes, normalized=True (no norms)
+
+    # And unnormalized mode reports the extra 4-byte norm per vector.
+    idx2 = PQSnapIndex(dim=32, M=8, K=16, normalized=False)
+    idx2.fit(corpus)
+    idx2.add_batch(list(range(50)), corpus)
+    assert idx2.stats()["bytes_per_vec"] == 12
+
+
+def test_double_fit_raises() -> None:
+    corpus = _unit_gaussian(100, 32, seed=0)
+    idx = PQSnapIndex(dim=32, M=8, K=16, normalized=True)
+    idx.fit(corpus)
+    with pytest.raises(RuntimeError, match="already called"):
+        idx.fit(corpus)
+
+
+def test_search_validates_query_and_k() -> None:
+    corpus = _unit_gaussian(100, 32, seed=0)
+    idx = PQSnapIndex(dim=32, M=8, K=16, normalized=True)
+    idx.fit(corpus)
+    idx.add_batch(list(range(100)), corpus)
+    # Zero-norm query returns [] (matching SnapIndex).
+    assert idx.search(np.zeros(32, dtype=np.float32), k=5) == []
+    # k < 1 raises.
+    with pytest.raises(ValueError, match="k must be"):
+        idx.search(corpus[0], k=0)
+
+
+def test_add_batch_validates_lengths() -> None:
+    corpus = _unit_gaussian(100, 32, seed=0)
+    idx = PQSnapIndex(dim=32, M=8, K=16, normalized=True)
+    idx.fit(corpus)
+    with pytest.raises(ValueError, match="same length"):
+        idx.add_batch([0, 1], corpus[:3])
+    with pytest.raises(ValueError, match="shape"):
+        idx.add_batch([0], np.zeros((1, 16), dtype=np.float32))
+
+
+def test_numeric_id_roundtrip(tmp_path: Path) -> None:
+    corpus = _unit_gaussian(50, 32, seed=0)
+    idx = PQSnapIndex(dim=32, M=8, K=16, normalized=True)
+    idx.fit(corpus)
+    idx.add_batch(list(range(50)), corpus)
+    path = tmp_path / "x.snpq"
+    idx.save(path)
+    reloaded = PQSnapIndex.load(path)
+    assert reloaded._ids[0] == 0 and isinstance(reloaded._ids[0], int)
+    assert reloaded._ids[-1] == 49
+
+
+def test_id_too_long_raises(tmp_path: Path) -> None:
+    corpus = _unit_gaussian(50, 32, seed=0)
+    idx = PQSnapIndex(dim=32, M=8, K=16, normalized=True)
+    idx.fit(corpus)
+    idx.add_batch(["x" * 70000] + list(range(49)), corpus)
+    with pytest.raises(ValueError, match="UTF-8 bytes"):
+        idx.save(tmp_path / "x.snpq")
+
+
+def test_kmeans_pp_init_duplicated_points() -> None:
+    """Degenerate corpus (many duplicates) must not crash the k-means++
+    fallback to uniform sampling."""
+    n, d = 100, 16
+    corpus = np.tile(np.eye(d, dtype=np.float32)[:5], (n // 5, 1))
+    corpus = corpus / np.linalg.norm(corpus, axis=1, keepdims=True)
+    idx = PQSnapIndex(dim=d, M=4, K=16, normalized=True, seed=0)
+    idx.fit(corpus)  # should not raise even though most pairs are identical
+    idx.add_batch(list(range(n)), corpus)
+    assert len(idx) == n

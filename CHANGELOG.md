@@ -13,14 +13,16 @@ the project uses [Semantic Versioning](https://semver.org/).
   `K`-centroid codebook via k-means++ + Lloyd iterations, and scores
   queries with asymmetric distance computation (ADC) over a per-query
   `(M, K)` LUT. On BGE-small / SciFact this reaches **recall@10 = 0.94
-  at 192 B/vec** where `SnapIndex(bits=3)` delivers 0.78 at the same
-  storage, and matches `SnapIndex(bits=4)` recall at half the bytes per
-  vector — at the cost of a one-off `fit(sample)` step that the
-  training-free `SnapIndex` does not need. Off by default:
-  `use_rht=False`, because the rotation that lets fixed Lloyd-Max
-  codebooks work on arbitrary data actively destroys the subspace
-  structure k-means is about to exploit. Ships with its own persistent
-  format (`.snpq`, magic `SNPQ`, v1).
+  at 192 B/vec** (with `normalized=True`) where `SnapIndex(bits=3)`
+  delivers 0.78 at the same storage, and matches `SnapIndex(bits=4)`
+  recall at half the bytes per vector — at the cost of a one-off
+  `fit(sample)` step that the training-free `SnapIndex` does not need.
+  Off by default: `use_rht=False`, because the rotation that lets fixed
+  Lloyd-Max codebooks work on arbitrary data actively destroys the
+  subspace structure k-means is about to exploit. Storage per vector is
+  `M` bytes in normalized mode, `M + 4` bytes otherwise (the float32
+  norm). Ships with its own persistent format (`.snpq`, magic `SNPQ`,
+  v1).
 
 ## [0.3.0] — 2026-04-14
 

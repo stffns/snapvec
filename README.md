@@ -26,7 +26,7 @@ pip install snapvec
 | Drop-in, no offline step, stable across datasets | **`SnapIndex`** (RHT + fixed Lloyd-Max codebooks) | none | baseline |
 | You can spend a few seconds training codebooks on a sample of your corpus | **`PQSnapIndex`** (product quantization, k-means codebooks) | one-off `fit(sample)` | +10–18 pp recall@10 at matched bytes/vec on real embeddings |
 
-On BGE-small / SciFact, `PQSnapIndex(M=192, K=256)` reaches recall@10 = 0.94 at 192 B/vec — `SnapIndex(bits=3)` delivers 0.78 at the same storage; `PQSnapIndex(M=128, K=256)` matches `SnapIndex(bits=4)` at half the bytes per vector. See `experiments/bench_pq_scaleup_validation.py` for the full sweep (3 seeds, K ∈ {16, 64, 256}, disjoint train/eval split).
+On BGE-small / SciFact, `PQSnapIndex(M=192, K=256, normalized=True)` reaches recall@10 = 0.94 at **192 B/vec** — `SnapIndex(bits=3)` delivers 0.78 at the same storage; `PQSnapIndex(M=128, K=256, normalized=True)` matches `SnapIndex(bits=4)` at half the bytes per vector. With `normalized=False` each vector carries an extra 4-byte float32 norm. See `experiments/bench_pq_scaleup_validation.py` for the full sweep (3 seeds, K ∈ {16, 64, 256}, disjoint train/eval split).
 
 ---
 
