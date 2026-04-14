@@ -17,6 +17,17 @@ pip install snapvec
 | Willing to pay a bit of accuracy for ~25% more compression vs 4-bit | **`bits=3`** | 7.8× smaller, now tightly packed — a genuine middle ground as of v0.3.0 |
 | Need unbiased inner-product estimates (KV-cache, attention) | **`bits=3` or `4` + `use_prod=True`** | QJL correction at the cost of ~2× search latency |
 
+### `SnapIndex` vs `PQSnapIndex`: training-free vs trained
+
+`snapvec` ships two index types with different trade-offs:
+
+| Use | Index | Training | Typical gain |
+|-----|-------|----------|--------------|
+| Drop-in, no offline step, stable across datasets | **`SnapIndex`** (RHT + fixed Lloyd-Max codebooks) | none | baseline |
+| You can spend a few seconds training codebooks on a sample of your corpus | **`PQSnapIndex`** (product quantization, k-means codebooks) | one-off `fit(sample)` | +10–18 pp recall@10 at matched bytes/vec on real embeddings |
+
+On BGE-small / SciFact, `PQSnapIndex(M=192, K=256, normalized=True)` reaches recall@10 = 0.94 at **192 B/vec** — `SnapIndex(bits=3)` delivers 0.78 at the same storage; `PQSnapIndex(M=128, K=256, normalized=True)` matches `SnapIndex(bits=4)` at half the bytes per vector. With `normalized=False` each vector carries an extra 4-byte float32 norm. See `experiments/bench_pq_scaleup_validation.py` for the full sweep (3 seeds, K ∈ {16, 64, 256}, disjoint train/eval split).
+
 ---
 
 ## Quick start
@@ -38,6 +49,29 @@ results = idx.search(query_vector.astype(np.float32), k=10)  # [(id, score), ...
 idx.save("my_index.snpv")
 idx2 = SnapIndex.load("my_index.snpv")   # atomic save, v1/v2/v3 compatible
 ```
+
+### Quick start — `PQSnapIndex` (higher recall, one-off `fit`)
+
+```python
+from snapvec import PQSnapIndex
+
+# Build: choose M subspaces dividing dim (or pdim if use_rht=True) and K ≤ 256 centroids.
+# Storage = M bytes/vec when normalized=True (+4 bytes otherwise).
+idx = PQSnapIndex(dim=384, M=192, K=256, normalized=True)   # 192 B/vec
+
+# Train once on a representative sample (≥ K, ~10–50 k is plenty)
+idx.fit(training_vectors.astype(np.float32))
+
+# Index and query exactly like SnapIndex
+idx.add_batch(ids=list(range(N)), vectors=corpus.astype(np.float32))
+results = idx.search(query.astype(np.float32), k=10)
+
+# Persist to its own format (atomic save, .snpq magic SNPQ v1)
+idx.save("my_index.snpq")
+idx2 = PQSnapIndex.load("my_index.snpq")
+```
+
+Pick `PQSnapIndex` when you can afford the one-off `fit` step and want the recall lift documented above; pick `SnapIndex` when you need a truly training-free, drop-in index.
 
 ### Input dtype: pass `np.float32`
 
