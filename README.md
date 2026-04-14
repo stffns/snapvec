@@ -2,7 +2,7 @@
 
 **Fast compressed approximate nearest-neighbor search.  Pure NumPy.  No heavy dependencies.**
 
-`snapvec` implements the TurboQuant compression pipeline — randomized Hadamard transform followed by optimal Gaussian scalar quantization (Lloyd-Max) — as a self-contained Python library for embedding vector search.  It achieves **8–12× compression** with **>0.92 recall@10** against float32 brute-force, using only NumPy.
+`snapvec` implements the TurboQuant compression pipeline — randomized Hadamard transform followed by optimal Gaussian scalar quantization (Lloyd-Max) — as a self-contained Python library for embedding vector search.  It achieves **~6× compression at 4-bit / ~12× at 2-bit** (disk and RAM) with **>0.92 recall@10** against float32 brute-force, using only NumPy.
 
 ```
 pip install snapvec
@@ -17,16 +17,44 @@ import numpy as np
 from snapvec import SnapIndex
 
 # Build index
-idx = SnapIndex(dim=384, bits=4)          # 4-bit, ~8x compression
+idx = SnapIndex(dim=384, bits=4)          # 4-bit, ~6x compression
+# ⚠ pass float32 arrays — see "Input dtype" below
+embeddings = np.asarray(embeddings, dtype=np.float32)
 idx.add_batch(ids=list(range(N)), vectors=embeddings)
 
 # Query
-results = idx.search(query_vector, k=10)     # [(id, score), ...]
+results = idx.search(query_vector.astype(np.float32), k=10)  # [(id, score), ...]
 
 # Persist
 idx.save("my_index.snpv")
 idx2 = SnapIndex.load("my_index.snpv")   # atomic save, v1/v2 compatible
 ```
+
+### Input dtype: pass `np.float32`
+
+`add_batch`, `add`, and `search` accept any array-like input but cast
+internally to `float32`. **If you pass `float64` (the NumPy default),
+a full-size temporary copy is allocated during the cast** — for
+`add_batch(1M × 384)` that's a transient 1.5 GB allocation on top of
+your input array, gone only after quantization completes.
+
+To avoid this:
+
+```python
+# Models that return float32 directly (most modern embeddings)
+embeddings = model.encode(texts)             # already float32 → no copy
+idx.add_batch(ids, embeddings)
+
+# Arrays from np.array([...]) default to float64 — cast explicitly
+embeddings = np.asarray(my_list, dtype=np.float32)   # cast once upfront
+idx.add_batch(ids, embeddings)
+
+# Loading from disk — respect the original dtype or force float32
+embeddings = np.load("vecs.npy").astype(np.float32, copy=False)
+```
+
+The cast is a correctness convenience, not a design choice — the whole
+pipeline (normalize, RHT, quantize) operates in `float32`.
 
 ---
 
@@ -82,14 +110,16 @@ and assigns each the conditional mean as reconstruction value.
 These boundaries and centroids are precomputed and hardcoded in `snapvec._codebooks`
 (no scipy required at runtime):
 
-| bits | levels | distortion (MSE) | bytes/coord (disk) |
-|------|--------|------------------|--------------------|
-| 2    | 4      | 0.1175           | 0.25               |
-| 3    | 8      | 0.0311           | 0.375              |
-| 4    | 16     | 0.0077           | 0.50               |
+| bits | levels | distortion (MSE) | bytes/coord (theoretical) | bytes/coord (actual) |
+|------|--------|------------------|---------------------------|----------------------|
+| 2    | 4      | 0.1175           | 0.25                      | 0.25                 |
+| 3    | 8      | 0.0311           | 0.375                     | 0.50 ⚠︎              |
+| 4    | 16     | 0.0077           | 0.50                      | 0.50                 |
 
-The quantized vector is stored as a `uint8` index matrix, bit-packed to `b/8`
-bytes per coordinate on disk.
+The quantized vector is stored as a `uint8` index matrix, bit-packed to
+`b/8` bytes per coordinate on disk when `b` evenly divides 8. At 3-bit the
+current packer is byte-aligned and wastes 2 bits per byte (see the
+"Compression ratios" section below).
 
 #### Step 4 — Approximate inner product
 
@@ -135,18 +165,34 @@ This follows from Lemma 4 of Zandieh et al. (2025):
 
 ### Compression ratios
 
-For N vectors of dimension `d = 384` (BGE-small):
+Measured on `d = 384` (BGE-small); the RHT pads to the next power of 2 so
+`padded_dim = 512`. All per-vector byte counts below include the padded
+dimensions — they are the numbers you actually pay in RAM and on disk.
+The trailing `+ 4` is the float32 norm; in `normalized=True` mode it is
+still persisted (as 1.0) to keep the on-disk layout stable across modes.
 
-| Backend        | Bytes/vector (disk) | Ratio vs float32 |
-|----------------|---------------------|------------------|
-| float32        | 1 536               | 1.0×             |
-| 4-bit snapvec  | 192 + 4             | **7.9×**         |
-| 3-bit snapvec  | 144 + 4             | **10.4×**        |
-| 2-bit snapvec  | 96 + 4              | **15.4×**        |
-| int8 (naïve)   | 384 + 4             | 3.9×             |
+| Backend        | Bytes/vec (disk) | Bytes/vec (RAM, idle) | Disk ratio | RAM ratio |
+|----------------|------------------|-----------------------|------------|-----------|
+| float32        | 1 536            | 1 536                 | 1.0×       | 1.0×      |
+| 4-bit snapvec  | 256 + 4          | 256 + 4               | **5.9×**   | **5.9×**  |
+| 3-bit snapvec  | 256 + 4 ⚠︎       | 512 + 4               | **5.9×** ⚠︎| **3.0×**  |
+| 2-bit snapvec  | 128 + 4          | 128 + 4               | **11.6×**  | **11.6×** |
+| int8 (naïve)   | 384 + 4          | 384 + 4               | 4.0×       | 4.0×      |
 
-The 4-byte overhead is the per-vector norm. In RAM, indices are stored as uint8
-(~3× vs float32); bit-packing applies on disk (~8× vs float32 at 4-bit).
+⚠︎ **3-bit note:** Current `_pack` is byte-aligned (ipb = ⌊8/3⌋ = 2), so 3-bit
+indices waste 2 bits per byte on disk — giving the same 0.5 bytes/coord as
+4-bit instead of the theoretical 0.375. Choose 4-bit for better recall at
+equal storage, or 2-bit for genuinely smaller footprint. True tight
+3-bit packing is on the roadmap.
+
+**RAM packing:** 2-bit and 4-bit indices are bit-packed in RAM (unpacked
+lazily when the `float16` cache is built — zero impact on warm query
+latency). 3-bit falls back to plain `uint8` until tight packing lands.
+
+**Search cache:** a lazy `float16` centroid expansion of shape
+`(N, padded_dim)` is materialised on first query for fast matmul (~5 ms
+at N = 100 k). It is evicted on writes and can be avoided entirely via
+`chunk_size` for memory-constrained deployments.
 
 ---
 
@@ -182,7 +228,7 @@ Offset  Size   Field
 12      4 B    bits: uint32 — total bits (2, 3, or 4)
 16      4 B    seed: uint32 — rotation seed
 20      4 B    n: uint32    — number of stored vectors
-24      4 B    flags: uint32 — bit-0: use_prod  [v2 only]
+24      4 B    flags: uint32 — bit-0: use_prod, bit-1: normalized  [v2 only]
 ──────────────────────────────────────────────────
 28      4 B    packed_len: uint32
 32      *      indices: bit-packed uint8 MSE indices
@@ -201,28 +247,36 @@ Backward compatible: v1 files (mse-only) load correctly in any version.
 
 ## API reference
 
-### `SnapIndex(dim, bits=4, seed=0, use_prod=False)`
+### `SnapIndex(dim, bits=4, seed=0, use_prod=False, chunk_size=None, normalized=False)`
 
-| Parameter  | Type  | Default | Description |
-|------------|-------|---------|-------------|
-| `dim`      | int   | —       | Embedding dimension |
-| `bits`     | int   | 4       | Bits per coordinate: 2, 3, or 4 |
-| `seed`     | int   | 0       | Rotation seed — must be consistent across build and query |
-| `use_prod` | bool  | False   | Enable QJL unbiased estimator (requires bits ≥ 3) |
+| Parameter     | Type       | Default | Description |
+|---------------|------------|---------|-------------|
+| `dim`         | int        | —       | Embedding dimension |
+| `bits`        | int        | 4       | Bits per coordinate: 2, 3, or 4 |
+| `seed`        | int        | 0       | Rotation seed — must be consistent across build and query |
+| `use_prod`    | bool       | False   | Enable QJL unbiased estimator (requires bits ≥ 3) |
+| `chunk_size`  | int \| None | None    | Stream search in chunks without the float16 cache (for N > 500k) |
+| `normalized`  | bool       | False   | Skip norm computation: trust that input vectors are unit-length |
 
 ### Methods
 
 ```python
-idx.add(id, vector)                    # Add one vector
-idx.add_batch(ids, vectors)            # Add N vectors (~50x faster than loop)
-idx.delete(id) -> bool                 # Remove by id, O(1) lookup
-idx.search(query, k=10) -> list        # [(id, score), ...] descending
-idx.save(path)                         # Atomic binary save to .snpv
-SnapIndex.load(path)                # Load from .snpv file
-idx.stats() -> dict                    # Compression / memory diagnostics
-len(idx)                               # Number of stored vectors
-repr(idx)                              # SnapIndex(dim=384, bits=4, mode=mse, n=1000)
+idx.add(id, vector)                           # Add one vector
+idx.add_batch(ids, vectors)                   # Add N vectors (~50x faster than loop)
+idx.delete(id) -> bool                        # Remove by id, O(1) lookup
+idx.search(query, k=10, filter_ids=None)      # [(id, score), ...] descending
+idx.save(path)                                # Atomic binary save to .snpv
+SnapIndex.load(path)                          # Load from .snpv file
+idx.stats() -> dict                           # Compression / memory diagnostics
+len(idx)                                      # Number of stored vectors
+repr(idx)                                     # SnapIndex(dim=384, bits=4, mode=mse, n=1000)
 ```
+
+> **All vector inputs should be `np.float32`.** Passing `float64` triggers
+> a full-size temporary cast inside `add_batch` / `search` (see "Input
+> dtype" in Quick start). Most embedding models already return `float32`;
+> only ad-hoc arrays built from Python lists via `np.array(...)` default
+> to `float64`.
 
 ---
 
@@ -243,9 +297,81 @@ Key contributions of this implementation over the reference:
 - **No scipy** — codebooks hardcoded, numpy is the only runtime dependency
 - **Batch WHT** — single O(n·d·log d) call for bulk inserts (~50x faster than loop)
 - **Float16 cache** — centroid expansions in half precision, ~2x faster matmul
+- **Packed RAM indices** — 2/4-bit indices stored bit-packed in RAM (2× less memory),
+  unpacked lazily when the float16 cache is built — zero impact on warm query latency
+- **Pre-filtering** — `filter_ids` restricts search to a subset with O(|filter| · d) cost
+- **Chunked streaming search** — `chunk_size` avoids the float16 cache for large N
 - **O(1) delete** — `_id_to_pos` dict + position compaction
 - **Atomic saves** — `.snpv.tmp` → `os.replace()` pattern
 - **Versioned format** — v1/v2 both loadable, forward-compatible flags field
+
+---
+
+## Roadmap
+
+The current implementation comfortably hits the 10–20 ms interactive budget
+for N ≤ 200 k, d ∈ {384, 768}, with p50 warm-query latency of ~5 ms at
+N=100 k, d=384. The float16 centroid cache carries ~77% of that time as a
+BLAS-bound `gemv`; the remaining 23% is Python glue (RHT, normalization,
+argpartition, result assembly).
+
+Future work is scoped around this measured profile — we don't optimize
+what's already fast.
+
+### Pure-Python improvements (no new dependencies)
+
+- **Tight 3-bit packing** — the current `_pack` is byte-aligned and wastes
+  2 bits per byte at 3-bit (ipb = ⌊8/3⌋ = 2). Packing 8 three-bit values
+  across 3 bytes would restore the theoretical 0.375 bytes/coord — a
+  25% disk reduction for the 3-bit mode and a meaningful gap between
+  "smaller but less accurate" (2-bit) and "larger but more accurate"
+  (4-bit) options.
+- **Vectorized FWHT** — replace the Python-level butterfly loop in
+  `_rotation._fwht_inplace` with reshape-based NumPy operations.
+  Expected: ~10–20× speedup on the RHT step (0.47 ms → ~0.03 ms at d=512),
+  ~5–10% end-to-end query improvement.
+- **Quantized norms on disk** — store per-vector norms as uint8 with a
+  (min, max) header. Saves 3 bytes/vec on disk with <0.1% precision loss.
+- **Typed ID storage** — persist integer IDs as fixed-width uint32/uint64
+  instead of UTF-8 strings when all IDs are numeric. Saves ~3 bytes/vec
+  on disk for sequential integer IDs.
+- **Positional-ID fast path** — when IDs are `0..N-1`, skip `_ids` list
+  and `_id_to_pos` dict entirely; position is the ID. Saves ~23 bytes/vec
+  of Python object overhead.
+
+### Hybrid Python + Rust core (opt-in accelerator)
+
+The following phases would ship as an optional `snapvec-core` wheel. The
+pure-Python path remains fully functional — Rust is detected at import
+time and used automatically when available.
+
+**Phase 1 — Cold-start / cache build (highest ROI)**
+  - Move centroid expansion + `float16` conversion to Rust with SIMD.
+  - Target: cold first-query 150 ms → ~20 ms on N=100 k, d=384.
+  - Smallest API surface; trivial Python fallback.
+
+**Phase 2 — LUT-based scan (eliminates the float16 cache)**
+  - Implement PQ-style Asymmetric Distance Computation: per-query LUT
+    (16 entries × pdim) + SIMD gather over packed indices.
+  - Target: warm query 5 ms → ~1.5–2 ms; cache RAM: 102 MB → 0.
+  - Enables N > 500 k with flat RAM growth.
+
+**Phase 3 — Batch RHT + quantization**
+  - Rust FWHT + `searchsorted` for `add_batch`.
+  - Target: `add_batch(100k, d=384)` 2.5 s → ~200 ms.
+  - Lowest priority — indexing is typically amortized offline.
+
+### Non-goals
+
+- **Trained codebooks (PQ / OPQ / RaBitQ-trained)**. Keeps the "no training
+  required" guarantee; the data-agnostic Lloyd-Max tables make snapvec
+  safe to use without a representative training sample.
+- **Graph indices (HNSW / NSG)**. Different trade-off space; snapvec
+  targets flat indices where compression and predictable latency matter
+  more than sub-linear scan.
+- **GPU acceleration**. The cache-matmul path is memory-bound on modern
+  CPUs; GPU would help only at very large N where network/transfer cost
+  already dominates.
 
 ---
 
