@@ -38,19 +38,30 @@ def _fwht_inplace(x: NDArray[np.float32]) -> None:
     whole array (via a reshape view into (..., n/(2h), 2, h) pairs), instead
     of a Python ``for`` loop over ``n/(2h)`` slices.  Same O(d log d)
     complexity, but ~10–15× less Python dispatch for single-query use.
+
+    Requires ``x`` to be C-contiguous — ``reshape`` only guarantees a view
+    (and therefore propagation of in-place writes) in that case.  Every
+    call site in this module builds ``x`` via a fresh ``.astype(...)``,
+    which always yields a contiguous array, so the guard below is cheap
+    insurance rather than hot-path logic.
     """
+    if not x.flags.c_contiguous:
+        raise ValueError(
+            "_fwht_inplace requires a C-contiguous array "
+            "(reshape would copy otherwise, breaking in-place semantics)"
+        )
     n = x.shape[-1]
     batch_shape = x.shape[:-1]
     h = 1
     while h < n:
         # View x as (..., n/(2h), 2, h): butterfly pairs sit along axis -2.
-        # reshape returns a view for C-contiguous arrays, so writes propagate
-        # back to x (our caller holds the original reference).
         view = x.reshape(*batch_shape, n // (2 * h), 2, h)
+        # Single copy is enough: snapshot the "a" half, then perform the
+        # butterfly in place.  view[0]+=view[1] updates a-side before the
+        # second assignment reads view[1] (still the original "b").
         a = view[..., 0, :].copy()
-        b = view[..., 1, :].copy()
-        view[..., 0, :] = a + b
-        view[..., 1, :] = a - b
+        view[..., 0, :] += view[..., 1, :]
+        view[..., 1, :] = a - view[..., 1, :]
         h *= 2
 
 

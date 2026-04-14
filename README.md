@@ -228,8 +228,8 @@ from mixed document corpora, 4-bit achieves **recall@10 ≈ 0.95**.
 ```
 Offset  Size   Field
 ──────────────────────────────────────────────────
-0       4 B    magic: "HDMX"
-4       4 B    version: uint32 (1 or 2)
+0       4 B    magic: "SNPV"
+4       4 B    version: uint32 (1, 2, or 3)
 8       4 B    dim: uint32  — original embedding dimension
 12      4 B    bits: uint32 — total bits (2, 3, or 4)
 16      4 B    seed: uint32 — rotation seed

@@ -202,6 +202,60 @@ class TestPersistence:
         results = loaded.search(vecs[5], k=3)
         assert results[0][0] == 5
 
+    def test_legacy_v2_prod_mode_3bit_payload_stays_aligned(self, tmp_path):
+        """Legacy v2 prod-mode files also used byte-aligned 3-bit MSE packing.
+
+        For bits=4, use_prod=True, mse_bits=3 — the persisted MSE indices in
+        a v0.2.x file were byte-aligned 3-bit.  This verifies the compat
+        decoder reads those indices correctly AND remains byte-aligned for
+        the trailing QJL / rnorms / ids payload (a slip here would silently
+        corrupt the prod correction term).
+        """
+        import struct
+        from snapvec._index import _MAGIC, _FLAG_PROD
+
+        # Real v3 prod-mode index to source the reference indices + payload.
+        idx = SnapIndex(dim=128, bits=4, use_prod=True)
+        vecs = _rand(15, dim=128)
+        idx.add_batch(list(range(15)), vecs)
+        unpacked = idx._unpack_to_indices()
+        assert idx._mse_bits == 3
+
+        # Build a legacy v2 byte stream: same header (but version=2) and
+        # same payload as the v3 save, except the indices block is re-packed
+        # with the byte-aligned 3-bit algorithm that v0.2.x used.
+        flat = unpacked.ravel()
+        ipb, mask = 2, 7
+        legacy_indices = np.zeros(len(flat) // ipb, dtype=np.uint8)
+        for i in range(ipb):
+            legacy_indices |= (flat[i::ipb] & mask).astype(np.uint8) << (i * 3)
+
+        assert idx._qjl is not None and idx._rnorms is not None
+        path = tmp_path / "legacy_prod.snpv"
+        with open(path, "wb") as f:
+            f.write(_MAGIC)
+            f.write(struct.pack("<IIIIII", 2, 128, 4, 0, 15, _FLAG_PROD))
+            f.write(struct.pack("<I", len(legacy_indices)))
+            f.write(legacy_indices.tobytes())
+            f.write(idx._norms.tobytes())
+            f.write(idx._qjl.tobytes())
+            f.write(idx._rnorms.tobytes())
+            for i in range(15):
+                enc = str(i).encode("utf-8")
+                f.write(struct.pack("<H", len(enc)))
+                f.write(enc)
+
+        loaded = SnapIndex.load(path)
+        assert loaded.use_prod is True
+        # Indices survive the legacy decode + re-pack into tight RAM layout.
+        np.testing.assert_array_equal(unpacked, loaded._unpack_to_indices())
+        # QJL payload remained aligned (no off-by-N from the shorter legacy
+        # indices block) and search reproduces the original self-match.
+        np.testing.assert_array_equal(idx._qjl, loaded._qjl)
+        np.testing.assert_array_equal(idx._rnorms, loaded._rnorms)
+        results = loaded.search(vecs[5], k=3)
+        assert results[0][0] == 5
+
     def test_wrong_magic_raises(self, tmp_path):
         path = tmp_path / "bad.snpv"
         path.write_bytes(b"XXXX" + b"\x00" * 20)
