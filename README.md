@@ -8,6 +8,15 @@
 pip install snapvec
 ```
 
+### Which `bits` should I use?
+
+| If you are… | Pick | Why |
+|-------------|------|-----|
+| Building RAG / semantic search (the default) | **`bits=4`** | ~95% recall@10 on real embeddings, 5.9× smaller than float32 |
+| Squeezing massive corpora where scale beats precision | **`bits=2`** | 11.6× smaller; recall@10 ≈ 0.83 on synthetic, higher on clustered real data |
+| Willing to pay a bit of accuracy for ~25% more compression vs 4-bit | **`bits=3`** | 7.8× smaller, now tightly packed — a genuine middle ground as of v0.3.0 |
+| Need unbiased inner-product estimates (KV-cache, attention) | **`bits=3` or `4` + `use_prod=True`** | QJL correction at the cost of ~2× search latency |
+
 ---
 
 ## Quick start
@@ -70,11 +79,19 @@ Product Quantization (PQ) splits vectors into M sub-vectors and quantizes each
 independently. It is effective but requires training a K-means codebook per dataset.
 Random Binary Quantization (RaBitQ, 1-bit) is fast but coarse.
 
-**TurboQuant** (Zandieh et al., ICLR 2026, [arXiv:2504.19874](https://arxiv.org/abs/2504.19874))
-achieves near-optimal distortion at b bits per coordinate **without training codebooks**,
-by first rotating the space with a randomized Hadamard transform to make coordinates
-approximately Gaussian, then quantizing each coordinate independently with the
+**TurboQuant** achieves near-optimal distortion at b bits per coordinate
+**without training codebooks**, by first rotating the space with a
+randomized Hadamard transform to make coordinates approximately
+Gaussian, then quantizing each coordinate independently with the
 optimal scalar quantizer for N(0,1).
+
+> 📄 **Paper:** Zandieh, Daliri, Hadian, Mirrokni (2025).
+> *TurboQuant: Online Vector Quantization with Near-optimal Distortion Rate.*
+> ICLR 2026 — [arXiv:2504.19874](https://arxiv.org/abs/2504.19874)
+>
+> `snapvec` is an independent, pure-NumPy implementation of the algorithm
+> described in that paper. If you use snapvec in academic work, please
+> cite the TurboQuant paper.
 
 ---
 
@@ -102,6 +119,37 @@ After rescaling `x̃ = x · √d'`, the coordinates are approximately `N(0,1)`
 regardless of the original distribution of `v`.
 
 **Complexity:** O(d log d) — no matrix multiplication, no codebook training.
+
+**Implementation note (v0.3.0):** the butterfly is fully vectorised via a
+reshape view — each level becomes one pair of NumPy ops on the whole
+array instead of a Python `for` loop over `n / (2h)` slices. The diff is
+tiny and the speedup is ~24× on a single query at `padded_dim = 512`:
+
+```python
+# Before: Python loop over n/(2h) slices per level → O(d) dispatches
+while h < n:
+    for i in range(0, n, h * 2):
+        a = x[..., i : i + h].copy()
+        b = x[..., i + h : i + 2 * h]
+        x[..., i : i + h]       = a + b
+        x[..., i + h : i + 2 * h] = a - b
+    h *= 2
+
+# After: reshape view → one pair of ops per level → O(log d) dispatches
+while h < n:
+    view = x.reshape(*x.shape[:-1], n // (2 * h), 2, h)
+    a = view[..., 0, :].copy()
+    view[..., 0, :] += view[..., 1, :]      # view[0] ← a + b
+    view[..., 1, :]  = a - view[..., 1, :]  # view[1] ← a - b
+    h *= 2
+```
+
+`reshape` returns a view only when the array is C-contiguous, so writes
+to `view` propagate back to `x` — no extra allocation per level beyond
+the single `a.copy()`. In the RHT pipeline we enforce this explicitly
+(via `np.ascontiguousarray` at the call site and a defensive assert
+inside `_fwht_inplace`); `.astype` alone does not guarantee C-order
+when the input is Fortran-contiguous.
 
 #### Step 3 — Lloyd-Max scalar quantization
 
@@ -199,6 +247,32 @@ full-scan path — once, off the hot matmul) or per-chunk/per-query in
 `(N, padded_dim)` is materialised on first query for fast matmul (~5 ms
 at N = 100 k). It is evicted on writes and can be avoided entirely via
 `chunk_size` for memory-constrained deployments.
+
+#### Real-world footprint: 1 M vectors at d = 768
+
+Typical for BGE-base, E5-base, `nomic-embed-text-v1`, and other 768-dim
+models. The RHT pads to 1024.
+
+| Backend        | Idle RAM | + cache (float16) | Warm peak |
+|----------------|----------|--------------------|-----------|
+| float32        | **2.86 GiB** | — | 2.86 GiB |
+| int8 (naïve)   | 0.72 GiB | — | 0.72 GiB |
+| 4-bit snapvec  | **0.48 GiB** | +1.91 GiB | 2.39 GiB |
+| 3-bit snapvec  | **0.36 GiB** | +1.91 GiB | 2.27 GiB |
+| 2-bit snapvec  | **0.24 GiB** | +1.91 GiB | 2.15 GiB |
+
+Numbers use binary units (1 GiB = 2³⁰ bytes); e.g. float32 is
+`1M × 768 × 4 B = 2.86 GiB`.
+
+The cache is materialised only during active search and is evicted on
+any write. With `chunk_size` set, warm peak drops to roughly
+`idle RAM + chunk_size × padded_dim × 2 B` (the per-chunk float16
+scratch) — e.g. `chunk_size=10_000` at `padded_dim=1024` adds ~20 MiB,
+at the cost of ~10× query latency. This is the usual memory/latency
+trade-off, exposed as a first-class flag.
+
+For a single-server RAG index at this scale, 4-bit snapvec idles at
+**half a GiB** where float32 idles at ~3 GiB.
 
 ---
 
