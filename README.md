@@ -260,6 +260,68 @@ Key contributions of this implementation over the reference:
 
 ---
 
+## Roadmap
+
+The current implementation comfortably hits the 10–20 ms interactive budget
+for N ≤ 200 k, d ∈ {384, 768}, with p50 warm-query latency of ~5 ms at
+N=100 k, d=384. The float16 centroid cache carries ~77% of that time as a
+BLAS-bound `gemv`; the remaining 23% is Python glue (RHT, normalization,
+argpartition, result assembly).
+
+Future work is scoped around this measured profile — we don't optimize
+what's already fast.
+
+### Pure-Python improvements (no new dependencies)
+
+- **Vectorized FWHT** — replace the Python-level butterfly loop in
+  `_rotation._fwht_inplace` with reshape-based NumPy operations.
+  Expected: ~10–20× speedup on the RHT step (0.47 ms → ~0.03 ms at d=512),
+  ~5–10% end-to-end query improvement.
+- **Quantized norms on disk** — store per-vector norms as uint8 with a
+  (min, max) header. Saves 3 bytes/vec on disk with <0.1% precision loss.
+- **Typed ID storage** — persist integer IDs as fixed-width uint32/uint64
+  instead of UTF-8 strings when all IDs are numeric. Saves ~3 bytes/vec
+  on disk for sequential integer IDs.
+- **Positional-ID fast path** — when IDs are `0..N-1`, skip `_ids` list
+  and `_id_to_pos` dict entirely; position is the ID. Saves ~23 bytes/vec
+  of Python object overhead.
+
+### Hybrid Python + Rust core (opt-in accelerator)
+
+The following phases would ship as an optional `snapvec-core` wheel. The
+pure-Python path remains fully functional — Rust is detected at import
+time and used automatically when available.
+
+**Phase 1 — Cold-start / cache build (highest ROI)**
+  - Move centroid expansion + `float16` conversion to Rust with SIMD.
+  - Target: cold first-query 150 ms → ~20 ms on N=100 k, d=384.
+  - Smallest API surface; trivial Python fallback.
+
+**Phase 2 — LUT-based scan (eliminates the float16 cache)**
+  - Implement PQ-style Asymmetric Distance Computation: per-query LUT
+    (16 entries × pdim) + SIMD gather over packed indices.
+  - Target: warm query 5 ms → ~1.5–2 ms; cache RAM: 102 MB → 0.
+  - Enables N > 500 k with flat RAM growth.
+
+**Phase 3 — Batch RHT + quantization**
+  - Rust FWHT + `searchsorted` for `add_batch`.
+  - Target: `add_batch(100k, d=384)` 2.5 s → ~200 ms.
+  - Lowest priority — indexing is typically amortized offline.
+
+### Non-goals
+
+- **Trained codebooks (PQ / OPQ / RaBitQ-trained)**. Keeps the "no training
+  required" guarantee; the data-agnostic Lloyd-Max tables make snapvec
+  safe to use without a representative training sample.
+- **Graph indices (HNSW / NSG)**. Different trade-off space; snapvec
+  targets flat indices where compression and predictable latency matter
+  more than sub-linear scan.
+- **GPU acceleration**. The cache-matmul path is memory-bound on modern
+  CPUs; GPU would help only at very large N where network/transfer cost
+  already dominates.
+
+---
+
 ## Installation
 
 ```bash
