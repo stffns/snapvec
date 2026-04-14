@@ -23,6 +23,18 @@ the project uses [Semantic Versioning](https://semver.org/).
   `M` bytes in normalized mode, `M + 4` bytes otherwise (the float32
   norm). Ships with its own persistent format (`.snpq`, magic `SNPQ`,
   v1).
+- **`ResidualSnapIndex`** — two-stage Lloyd-Max quantization (coarse
+  `b1` bits + residual `b2` bits, with the residual rescaled by the
+  theoretical `σ_r = √ε(b1)`). Reuses the existing `{2, 3, 4}`-bit
+  codebooks; no new training. Opens operating points uniform snapvec
+  cannot reach: on BGE-small/SciFact, `b1=3,b2=3` (6 bits/coord) lifts
+  recall@10 from 0.870 (uniform 4-bit) to 0.921, and `b1=4,b2=3`
+  (7 bits/coord) reaches 0.957. Includes a `rerank_M` search mode that
+  does a coarse pass over the whole corpus and reranks only the top-`M`
+  with the full reconstruction — converges to full-reconstruction
+  recall at `M=100`, making the fine stage O(M) instead of O(N).
+  New on-disk format `.snpr` (magic `SNPR`, v1); codes are unpacked
+  `uint8` per coordinate in this release (tight packing is follow-up).
 
 ## [0.3.0] — 2026-04-14
 

@@ -12,15 +12,17 @@ See https://github.com/stffns/snapvec for documentation.
 """
 from __future__ import annotations
 
-from ._index import SnapIndex
 from ._codebooks import get_codebook
+from ._index import SnapIndex
 from ._pq import PQSnapIndex
-from ._rotation import rht, padded_dim
+from ._residual import ResidualSnapIndex
+from ._rotation import padded_dim, rht
 
 __version__ = "0.3.0"
 __all__ = [
     "SnapIndex",
     "PQSnapIndex",
+    "ResidualSnapIndex",
     "get_codebook",
     "rht",
     "padded_dim",
