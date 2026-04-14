@@ -15,7 +15,7 @@ pip install snapvec
 | Building RAG / semantic search (the default) | **`bits=4`** | ~95% recall@10 on real embeddings, 5.9× smaller than float32 |
 | Squeezing massive corpora where scale beats precision | **`bits=2`** | 11.6× smaller; recall@10 ≈ 0.83 on synthetic, higher on clustered real data |
 | Willing to pay a bit of accuracy for ~25% more compression vs 4-bit | **`bits=3`** | 7.8× smaller, now tightly packed — a genuine middle ground as of v0.3.0 |
-| Need unbiased inner-product estimates (KV-cache, attention) | `bits=3` or `4` + `use_prod=True` | QJL correction at the cost of ~2× search latency |
+| Need unbiased inner-product estimates (KV-cache, attention) | **`bits=3` or `4` + `use_prod=True`** | QJL correction at the cost of ~2× search latency |
 
 ---
 
@@ -144,11 +144,12 @@ while h < n:
     h *= 2
 ```
 
-`reshape` returns a view when the array is C-contiguous (which it always
-is in the RHT pipeline, because we build it via `.astype`), so writes to
-`view` propagate back to `x` — no extra allocation per level beyond the
-single `a.copy()`. The function asserts contiguity defensively to make
-the requirement explicit.
+`reshape` returns a view only when the array is C-contiguous, so writes
+to `view` propagate back to `x` — no extra allocation per level beyond
+the single `a.copy()`. In the RHT pipeline we enforce this explicitly
+(via `np.ascontiguousarray` at the call site and a defensive assert
+inside `_fwht_inplace`); `.astype` alone does not guarantee C-order
+when the input is Fortran-contiguous.
 
 #### Step 3 — Lloyd-Max scalar quantization
 
@@ -249,24 +250,29 @@ at N = 100 k). It is evicted on writes and can be avoided entirely via
 
 #### Real-world footprint: 1 M vectors at d = 768
 
-Typical for BGE-large, E5-large, Cohere embed, `text-embedding-ada-002`,
-mxbai-embed-large, and other 768-dim models. The RHT pads to 1024.
+Typical for BGE-base, E5-base, `nomic-embed-text-v1`, and other 768-dim
+models. The RHT pads to 1024.
 
 | Backend        | Idle RAM | + cache (float16) | Warm peak |
-|----------------|----------|-------------------|-----------|
-| float32        | **2.86 GB** | — | 2.86 GB |
-| int8 (naïve)   | 0.72 GB | — | 0.72 GB |
-| 4-bit snapvec  | **0.48 GB** | +1.91 GB | 2.39 GB |
-| 3-bit snapvec  | **0.36 GB** | +1.91 GB | 2.27 GB |
-| 2-bit snapvec  | **0.24 GB** | +1.91 GB | 2.15 GB |
+|----------------|----------|--------------------|-----------|
+| float32        | **2.86 GiB** | — | 2.86 GiB |
+| int8 (naïve)   | 0.72 GiB | — | 0.72 GiB |
+| 4-bit snapvec  | **0.48 GiB** | +1.91 GiB | 2.39 GiB |
+| 3-bit snapvec  | **0.36 GiB** | +1.91 GiB | 2.27 GiB |
+| 2-bit snapvec  | **0.24 GiB** | +1.91 GiB | 2.15 GiB |
+
+Numbers use binary units (1 GiB = 2³⁰ bytes); e.g. float32 is
+`1M × 768 × 4 B = 2.86 GiB`.
 
 The cache is materialised only during active search and is evicted on
-any write. With `chunk_size` set, warm peak drops to `idle RAM + ~20 MB`
-(one chunk at a time) at the cost of ~10× query latency — the usual
-memory/latency trade-off, exposed as a first-class flag.
+any write. With `chunk_size` set, warm peak drops to roughly
+`idle RAM + chunk_size × padded_dim × 2 B` (the per-chunk float16
+scratch) — e.g. `chunk_size=10_000` at `padded_dim=1024` adds ~20 MiB,
+at the cost of ~10× query latency. This is the usual memory/latency
+trade-off, exposed as a first-class flag.
 
 For a single-server RAG index at this scale, 4-bit snapvec idles at
-**half a GB** where float32 idles at 3 GB.
+**half a GiB** where float32 idles at ~3 GiB.
 
 ---
 
