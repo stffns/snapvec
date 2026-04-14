@@ -17,7 +17,9 @@ HadaMax_prod (use_prod=True)
 
 Memory layout
 -------------
-``_indices``  — (N, pdim) uint8 in RAM, bit-packed only on disk.
+``_indices``  — RAM-packed uint8 when mse_bits divides 8 (2-bit or 4-bit
+               modes): 2 indices per byte at 4-bit, 4 per byte at 2-bit.
+               Falls back to plain (N, pdim) uint8 at 3-bit.
 ``_cache``    — (N, pdim) float16, lazy centroid expansion.  Evicted on writes.
                For N > ~500k the cache dominates RAM; use ``chunk_size`` to
                search without materialising it (streaming mode).
@@ -29,7 +31,8 @@ Reference: Zandieh, Daliri, Hadian, Mirrokni (2025).
 File format
 -----------
 v1 (legacy)  — mse only, 20-byte header
-v2           — adds flags field (bit-0 = use_prod) + QJL arrays
+v2           — adds flags field (bit-0 = use_prod, bit-1 = normalized)
+               + QJL arrays
 """
 from __future__ import annotations
 
@@ -46,6 +49,7 @@ from ._rotation import padded_dim, rht
 _MAGIC = b"SNPV"
 _VERSION = 2
 _FLAG_PROD = 0x1
+_FLAG_NORMALIZED = 0x2
 
 
 class SnapIndex:
@@ -68,6 +72,9 @@ class SnapIndex:
         If set, search processes ``chunk_size`` rows at a time without
         materialising the full float16 cache.  Use for N > 500k to trade
         compute for memory.  ``None`` (default) uses the cached matmul.
+    normalized : bool
+        If True, input vectors are assumed to already be unit-length.
+        Skips norm computation in add/add_batch.
 
     Examples
     --------
@@ -88,6 +95,7 @@ class SnapIndex:
         seed: int = 0,
         use_prod: bool = False,
         chunk_size: int | None = None,
+        normalized: bool = False,
     ) -> None:
         if bits not in (2, 3, 4):
             raise ValueError(f"bits must be 2, 3, or 4; got {bits}")
@@ -102,16 +110,22 @@ class SnapIndex:
         self.seed = seed
         self.use_prod = use_prod
         self.chunk_size = chunk_size
+        self.normalized = normalized
 
         self._pdim: int = padded_dim(dim)
         self._mse_bits: int = bits - 1 if use_prod else bits
         self._centroids: NDArray[np.float32]
         self._centroids, _ = get_codebook(self._mse_bits)
 
+        # RAM bit-packing: pack when mse_bits evenly divides 8 (2-bit, 4-bit)
+        self._can_pack: bool = (8 % self._mse_bits == 0)
+        self._ipb: int = 8 // self._mse_bits if self._can_pack else 1
+        _pcols = self._pdim // self._ipb if self._can_pack else self._pdim
+
         # Core storage
         self._ids: list[Any] = []
         self._id_to_pos: dict[Any, int] = {}
-        self._indices: NDArray[np.uint8] = np.zeros((0, self._pdim), dtype=np.uint8)
+        self._indices: NDArray[np.uint8] = np.zeros((0, _pcols), dtype=np.uint8)
         self._norms: NDArray[np.float32] = np.zeros(0, dtype=np.float32)
 
         # TurboQuant_prod arrays (None when use_prod=False)
@@ -127,6 +141,48 @@ class SnapIndex:
         self._cache: NDArray[np.float16] | None = None
 
     # ──────────────────────────────────────────────────────────────────── #
+    # RAM bit-packing helpers                                               #
+    # ──────────────────────────────────────────────────────────────────── #
+
+    def _pack_matrix(self, mat: NDArray[np.uint8]) -> NDArray[np.uint8]:
+        """Pack (N, pdim) uint8 indices → (N, pdim // ipb) uint8 for RAM.
+
+        At 4-bit: 2 indices per byte.  At 2-bit: 4 indices per byte.
+        """
+        bits = self._mse_bits
+        ipb = self._ipb
+        mask = (1 << bits) - 1
+        n = len(mat)
+        packed: NDArray[np.uint8] = np.zeros(
+            (n, self._pdim // ipb), dtype=np.uint8,
+        )
+        for i in range(ipb):
+            packed |= (mat[:, i::ipb] & mask).astype(np.uint8) << (i * bits)
+        return packed
+
+    def _unpack_to_indices(
+        self, packed: NDArray[np.uint8] | None = None,
+    ) -> NDArray[np.uint8]:
+        """Unpack RAM-packed indices to (N, pdim) uint8.
+
+        Returns the input unchanged when RAM packing is not active.
+        """
+        if packed is None:
+            packed = self._indices
+        if not self._can_pack:
+            return packed
+        bits = self._mse_bits
+        ipb = self._ipb
+        mask = (1 << bits) - 1
+        n = len(packed)
+        mat: NDArray[np.uint8] = np.empty(
+            (n, packed.shape[1] * ipb), dtype=np.uint8,
+        )
+        for i in range(ipb):
+            mat[:, i::ipb] = ((packed >> (i * bits)) & mask).astype(np.uint8)
+        return mat
+
+    # ──────────────────────────────────────────────────────────────────── #
     # Core API                                                              #
     # ──────────────────────────────────────────────────────────────────── #
 
@@ -135,9 +191,10 @@ class SnapIndex:
 
     def __repr__(self) -> str:
         mode = "prod" if self.use_prod else "mse"
+        extra = ", normalized" if self.normalized else ""
         return (
             f"SnapIndex(dim={self.dim}, bits={self.bits}, "
-            f"mode={mode}, n={len(self)})"
+            f"mode={mode}, n={len(self)}{extra})"
         )
 
     def add(self, id: Any, vector: NDArray[np.float32]) -> None:
@@ -160,9 +217,16 @@ class SnapIndex:
             return
 
         # 1. Normalize to unit sphere
-        raw_norms: NDArray[np.float32] = np.linalg.norm(arr, axis=1)
-        safe: NDArray[np.float32] = np.where(raw_norms > 1e-10, raw_norms, 1.0)
-        units: NDArray[np.float32] = arr / safe[:, None]
+        if self.normalized:
+            units: NDArray[np.float32] = arr
+            batch_norms: NDArray[np.float32] = np.ones(n, dtype=np.float32)
+        else:
+            raw_norms: NDArray[np.float32] = np.linalg.norm(arr, axis=1)
+            safe: NDArray[np.float32] = np.where(raw_norms > 1e-10, raw_norms, 1.0)
+            units = arr / safe[:, None]
+            batch_norms = np.where(
+                raw_norms > 1e-10, raw_norms, 0.0
+            ).astype(np.float32)
 
         # 2. Zero-pad to power of 2, batch RHT — O(n·d·log d)
         pdim = self._pdim
@@ -177,9 +241,6 @@ class SnapIndex:
             boundaries, scaled.ravel()
         ).astype(np.uint8)
         batch_idx: NDArray[np.uint8] = flat_idx.reshape(n, pdim)
-        batch_norms: NDArray[np.float32] = np.where(
-            raw_norms > 1e-10, raw_norms, 0.0
-        ).astype(np.float32)
 
         # 4. QJL residual (prod mode only)
         qjl_signs: NDArray[np.int8] | None = None
@@ -197,7 +258,11 @@ class SnapIndex:
                 np.linalg.norm(r_scaled, axis=1) / np.sqrt(pdim)
             ).astype(np.float32)
 
-        # 5. Append to storage arrays
+        # 5. RAM bit-pack indices when possible
+        if self._can_pack:
+            batch_idx = self._pack_matrix(batch_idx)
+
+        # 6. Append to storage arrays
         start = len(self._ids)
         self._ids.extend(ids)
         for i, id_val in enumerate(ids):
@@ -309,24 +374,24 @@ class SnapIndex:
                 return []
             rows.sort()  # contiguous access is faster for cache/chunked
             active_ids = [self._ids[r] for r in rows]
-            indices = self._indices[rows]
+            packed_slice = self._indices[rows]
             qjl = self._qjl[rows] if self._qjl is not None else None
             rnorms = self._rnorms[rows] if self._rnorms is not None else None
         else:
-            rows = np.arange(len(self._ids), dtype=np.intp)
             active_ids = self._ids
-            indices = self._indices
+            packed_slice = self._indices
             qjl = self._qjl
             rnorms = self._rnorms
 
         scores: NDArray[np.float32]
         if self.chunk_size is not None:
-            scores = self._search_chunked_indices(indices, q_scaled)
+            scores = self._search_chunked(packed_slice, q_scaled)
         elif filter_ids is None:
             # Full scan — use lazy float16 cache (built once, reused across queries)
             scores = self._search_cached(q_scaled)
         else:
             # Filtered subset — skip cache, compute directly on the slice
+            indices = self._unpack_to_indices(packed_slice)
             expanded: NDArray[np.float16] = self._centroids[indices].astype(np.float16)
             raw = (expanded @ q_scaled).astype(np.float32)
             scores = (raw / pdim).astype(np.float32)
@@ -352,29 +417,31 @@ class SnapIndex:
         Peak RAM: O(N·d·2 bytes) for the float16 cache.
         """
         if self._cache is None:
-            self._cache = self._centroids[self._indices].astype(np.float16)
+            indices = self._unpack_to_indices()
+            self._cache = self._centroids[indices].astype(np.float16)
         raw = (self._cache @ q_scaled).astype(np.float32)
         result: NDArray[np.float32] = (raw / self._pdim).astype(np.float32)
         return result
 
-    def _search_chunked_indices(
+    def _search_chunked(
         self,
-        indices: NDArray[np.uint8],
+        packed_indices: NDArray[np.uint8],
         q_scaled: NDArray[np.float32],
     ) -> NDArray[np.float32]:
-        """Chunked search over arbitrary index rows — no cache materialised.
+        """Chunked search — unpacks per chunk, no full cache materialised.
 
         Processes ``chunk_size`` rows at a time.  Works for both the full
         index and filtered subsets (``filter_ids``).
         """
         assert self.chunk_size is not None
-        n = len(indices)
+        n = len(packed_indices)
         scores = np.empty(n, dtype=np.float32)
         cs = self.chunk_size
         for start in range(0, n, cs):
             end = min(start + cs, n)
+            chunk_idx = self._unpack_to_indices(packed_indices[start:end])
             chunk: NDArray[np.float16] = self._centroids[
-                indices[start:end]
+                chunk_idx
             ].astype(np.float16)
             scores[start:end] = (chunk @ q_scaled).astype(np.float32) / self._pdim
         return scores
@@ -416,8 +483,15 @@ class SnapIndex:
         tmp = path.with_suffix(path.suffix + ".tmp")
 
         n = len(self._ids)
-        flags = _FLAG_PROD if self.use_prod else 0
-        packed = _pack(self._indices, self._mse_bits)
+        flags = 0
+        if self.use_prod:
+            flags |= _FLAG_PROD
+        if self.normalized:
+            flags |= _FLAG_NORMALIZED
+
+        # Unpack RAM indices before disk bit-packing
+        unpacked = self._unpack_to_indices()
+        packed = _pack(unpacked, self._mse_bits)
 
         with open(tmp, "wb") as f:
             f.write(_MAGIC)
@@ -452,18 +526,26 @@ class SnapIndex:
             if version == 1:
                 dim, bits, seed, n = struct.unpack("<IIII", f.read(16))
                 use_prod = False
+                normalized = False
             elif version == 2:
                 dim, bits, seed, n, flags = struct.unpack("<IIIII", f.read(20))
                 use_prod = bool(flags & _FLAG_PROD)
+                normalized = bool(flags & _FLAG_NORMALIZED)
             else:
                 raise ValueError(f"Unsupported file version: {version}")
 
-            idx = cls(dim=dim, bits=bits, seed=seed, use_prod=use_prod)
+            idx = cls(dim=dim, bits=bits, seed=seed, use_prod=use_prod,
+                      normalized=normalized)
             pdim = idx._pdim
             mse_bits = idx._mse_bits
 
             (packed_len,) = struct.unpack("<I", f.read(4))
-            idx._indices = _unpack(f.read(packed_len), n, pdim, mse_bits)
+            unpacked = _unpack(f.read(packed_len), n, pdim, mse_bits)
+            # RAM-pack indices when possible
+            if idx._can_pack:
+                idx._indices = idx._pack_matrix(unpacked)
+            else:
+                idx._indices = unpacked
             idx._norms = np.frombuffer(f.read(n * 4), dtype=np.float32).copy()
 
             if use_prod and n > 0:
@@ -511,6 +593,8 @@ class SnapIndex:
             "bits": self.bits,
             "mse_bits": self._mse_bits,
             "use_prod": self.use_prod,
+            "normalized": self.normalized,
+            "ram_packed": self._can_pack,
             "chunk_size": self.chunk_size,
             "float32_bytes": orig,
             "compressed_bytes": mse_b,
@@ -532,6 +616,11 @@ class SnapIndex:
 #     (one vectorised unpack at startup, amortised over all queries).          #
 #   - For large N (>500k), use chunk_size to avoid the float16 cache instead  #
 #     of bit-packing in RAM — same memory savings, no per-query unpack cost.  #
+#                                                                              #
+# UPDATE: RAM indices are now also bit-packed when mse_bits divides 8 (2-bit  #
+#   and 4-bit modes). Unpacking happens once when building the float16 cache  #
+#   — not on the hot matmul path. This halves the indices footprint with no   #
+#   impact on warm query latency.                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
 
 def _pack(mat: NDArray[np.uint8], bits: int) -> bytes:

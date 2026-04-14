@@ -261,6 +261,101 @@ class TestChunkedSearch:
 
 # ─────────────────────────────────────────────── Pre-filtering ───────────────
 
+class TestRamPacking:
+    """RAM bit-packing: indices stored at 4 bits/coord (2 per byte) at 4-bit."""
+
+    def test_packed_indices_at_4bit(self):
+        idx = SnapIndex(dim=DIM, bits=4)
+        idx.add_batch(list(range(10)), _rand(10))
+        assert idx._indices.shape == (10, idx._pdim // 2)
+        assert idx._can_pack is True
+
+    def test_packed_indices_at_2bit(self):
+        idx = SnapIndex(dim=DIM, bits=2)
+        idx.add_batch(list(range(5)), _rand(5))
+        assert idx._indices.shape == (5, idx._pdim // 4)
+
+    def test_unpacked_indices_at_3bit(self):
+        """3-bit indices cannot pack evenly into bytes; stay as uint8."""
+        idx = SnapIndex(dim=DIM, bits=3)
+        idx.add_batch(list(range(5)), _rand(5))
+        assert idx._can_pack is False
+        assert idx._indices.shape == (5, idx._pdim)
+
+    def test_packed_search_top1_is_self(self):
+        """Packed-index search should still find query as nearest neighbor."""
+        vecs = _rand(100)
+        idx = SnapIndex(dim=DIM, bits=4)
+        idx.add_batch(list(range(100)), vecs)
+        results = idx.search(vecs[3], k=5)
+        assert results[0][0] == 3
+
+    def test_packed_save_load_roundtrip(self, tmp_path):
+        vecs = _rand(30)
+        idx = SnapIndex(dim=DIM, bits=4)
+        idx.add_batch(list(range(30)), vecs)
+        path = tmp_path / "packed.snpv"
+        idx.save(path)
+        idx2 = SnapIndex.load(path)
+        assert idx2._can_pack is True
+        assert idx2._indices.shape == idx._indices.shape
+        np.testing.assert_array_equal(
+            idx._unpack_to_indices(), idx2._unpack_to_indices()
+        )
+
+    def test_compression_ratio_improved_4bit(self):
+        """RAM compression should be ~6x at 4-bit (vs ~3x before packing)."""
+        idx = SnapIndex(dim=384, bits=4)
+        idx.add_batch(list(range(1000)), _rand(1000, dim=384))
+        s = idx.stats()
+        assert s["compression_ratio"] > 5.0, s
+        assert s["ram_packed"] is True
+
+
+class TestNormalized:
+    """normalized=True: skip norm computation for pre-normalized inputs."""
+
+    def test_normalized_flag_in_repr(self):
+        idx = SnapIndex(dim=DIM, bits=4, normalized=True)
+        assert "normalized" in repr(idx)
+
+    def test_normalized_search_works(self):
+        vecs = _rand(50)  # _rand already produces unit vectors
+        idx = SnapIndex(dim=DIM, bits=4, normalized=True)
+        idx.add_batch(list(range(50)), vecs)
+        results = idx.search(vecs[7], k=5)
+        assert 7 in [r[0] for r in results]
+
+    def test_normalized_norms_are_one(self):
+        idx = SnapIndex(dim=DIM, bits=4, normalized=True)
+        idx.add_batch(list(range(10)), _rand(10))
+        np.testing.assert_array_equal(idx._norms, np.ones(10, dtype=np.float32))
+
+    def test_normalized_save_load(self, tmp_path):
+        vecs = _rand(20)
+        idx = SnapIndex(dim=DIM, bits=4, normalized=True)
+        idx.add_batch(list(range(20)), vecs)
+        path = tmp_path / "norm.snpv"
+        idx.save(path)
+        idx2 = SnapIndex.load(path)
+        assert idx2.normalized is True
+        results = idx2.search(vecs[5], k=5)
+        assert 5 in [r[0] for r in results]
+
+    def test_normalized_matches_non_normalized_results(self):
+        """For unit inputs, normalized=True must give identical top-k."""
+        vecs = _rand(100)
+        ids = list(range(100))
+        a = SnapIndex(dim=DIM, bits=4, normalized=False)
+        a.add_batch(ids, vecs)
+        b = SnapIndex(dim=DIM, bits=4, normalized=True)
+        b.add_batch(ids, vecs)
+        for i in range(0, 20, 5):
+            ra = [x[0] for x in a.search(vecs[i], k=5)]
+            rb = [x[0] for x in b.search(vecs[i], k=5)]
+            assert ra == rb
+
+
 class TestFilterIds:
     def test_filter_restricts_results(self):
         """Results must only contain ids from filter_ids."""

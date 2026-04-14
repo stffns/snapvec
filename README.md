@@ -137,16 +137,21 @@ This follows from Lemma 4 of Zandieh et al. (2025):
 
 For N vectors of dimension `d = 384` (BGE-small):
 
-| Backend        | Bytes/vector (disk) | Ratio vs float32 |
-|----------------|---------------------|------------------|
-| float32        | 1 536               | 1.0×             |
-| 4-bit snapvec  | 192 + 4             | **7.9×**         |
-| 3-bit snapvec  | 144 + 4             | **10.4×**        |
-| 2-bit snapvec  | 96 + 4              | **15.4×**        |
-| int8 (naïve)   | 384 + 4             | 3.9×             |
+| Backend        | Bytes/vector (disk) | Bytes/vector (RAM, idle) | Ratio vs float32 |
+|----------------|---------------------|--------------------------|------------------|
+| float32        | 1 536               | 1 536                    | 1.0×             |
+| 4-bit snapvec  | 192 + 4             | 256 + 4                  | **7.9× / 5.9×**  |
+| 3-bit snapvec  | 144 + 4             | 512 + 4                  | **10.4× / 3.0×** |
+| 2-bit snapvec  | 96 + 4              | 128 + 4                  | **15.4× / 11.6×**|
+| int8 (naïve)   | 384 + 4             | 384 + 4                  | 3.9×             |
 
-The 4-byte overhead is the per-vector norm. In RAM, indices are stored as uint8
-(~3× vs float32); bit-packing applies on disk (~8× vs float32 at 4-bit).
+The 4-byte overhead is the per-vector norm. **RAM indices are bit-packed** when
+`bits` evenly divides 8 (2-bit: 4 per byte, 4-bit: 2 per byte); 3-bit falls back
+to uint8 storage. Bit-packing also applies on disk for all bit widths.
+
+During active search, a lazy `float16` centroid cache (`2·padded_dim` bytes/vec)
+is materialised for fast matmul; it is evicted on writes and can be avoided
+entirely via `chunk_size` for memory-constrained deployments.
 
 ---
 
@@ -182,7 +187,7 @@ Offset  Size   Field
 12      4 B    bits: uint32 — total bits (2, 3, or 4)
 16      4 B    seed: uint32 — rotation seed
 20      4 B    n: uint32    — number of stored vectors
-24      4 B    flags: uint32 — bit-0: use_prod  [v2 only]
+24      4 B    flags: uint32 — bit-0: use_prod, bit-1: normalized  [v2 only]
 ──────────────────────────────────────────────────
 28      4 B    packed_len: uint32
 32      *      indices: bit-packed uint8 MSE indices
@@ -201,27 +206,29 @@ Backward compatible: v1 files (mse-only) load correctly in any version.
 
 ## API reference
 
-### `SnapIndex(dim, bits=4, seed=0, use_prod=False)`
+### `SnapIndex(dim, bits=4, seed=0, use_prod=False, chunk_size=None, normalized=False)`
 
-| Parameter  | Type  | Default | Description |
-|------------|-------|---------|-------------|
-| `dim`      | int   | —       | Embedding dimension |
-| `bits`     | int   | 4       | Bits per coordinate: 2, 3, or 4 |
-| `seed`     | int   | 0       | Rotation seed — must be consistent across build and query |
-| `use_prod` | bool  | False   | Enable QJL unbiased estimator (requires bits ≥ 3) |
+| Parameter     | Type       | Default | Description |
+|---------------|------------|---------|-------------|
+| `dim`         | int        | —       | Embedding dimension |
+| `bits`        | int        | 4       | Bits per coordinate: 2, 3, or 4 |
+| `seed`        | int        | 0       | Rotation seed — must be consistent across build and query |
+| `use_prod`    | bool       | False   | Enable QJL unbiased estimator (requires bits ≥ 3) |
+| `chunk_size`  | int \| None | None    | Stream search in chunks without the float16 cache (for N > 500k) |
+| `normalized`  | bool       | False   | Skip norm computation: trust that input vectors are unit-length |
 
 ### Methods
 
 ```python
-idx.add(id, vector)                    # Add one vector
-idx.add_batch(ids, vectors)            # Add N vectors (~50x faster than loop)
-idx.delete(id) -> bool                 # Remove by id, O(1) lookup
-idx.search(query, k=10) -> list        # [(id, score), ...] descending
-idx.save(path)                         # Atomic binary save to .snpv
-SnapIndex.load(path)                # Load from .snpv file
-idx.stats() -> dict                    # Compression / memory diagnostics
-len(idx)                               # Number of stored vectors
-repr(idx)                              # SnapIndex(dim=384, bits=4, mode=mse, n=1000)
+idx.add(id, vector)                           # Add one vector
+idx.add_batch(ids, vectors)                   # Add N vectors (~50x faster than loop)
+idx.delete(id) -> bool                        # Remove by id, O(1) lookup
+idx.search(query, k=10, filter_ids=None)      # [(id, score), ...] descending
+idx.save(path)                                # Atomic binary save to .snpv
+SnapIndex.load(path)                          # Load from .snpv file
+idx.stats() -> dict                           # Compression / memory diagnostics
+len(idx)                                      # Number of stored vectors
+repr(idx)                                     # SnapIndex(dim=384, bits=4, mode=mse, n=1000)
 ```
 
 ---
@@ -243,6 +250,10 @@ Key contributions of this implementation over the reference:
 - **No scipy** — codebooks hardcoded, numpy is the only runtime dependency
 - **Batch WHT** — single O(n·d·log d) call for bulk inserts (~50x faster than loop)
 - **Float16 cache** — centroid expansions in half precision, ~2x faster matmul
+- **Packed RAM indices** — 2/4-bit indices stored bit-packed in RAM (2× less memory),
+  unpacked lazily when the float16 cache is built — zero impact on warm query latency
+- **Pre-filtering** — `filter_ids` restricts search to a subset with O(|filter| · d) cost
+- **Chunked streaming search** — `chunk_size` avoids the float16 cache for large N
 - **O(1) delete** — `_id_to_pos` dict + position compaction
 - **Atomic saves** — `.snpv.tmp` → `os.replace()` pattern
 - **Versioned format** — v1/v2 both loadable, forward-compatible flags field
