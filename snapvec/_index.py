@@ -34,7 +34,12 @@ File format
 -----------
 v1 (legacy)  — mse only, 20-byte header
 v2           — adds flags field (bit-0 = use_prod, bit-1 = normalized)
-               + QJL arrays
+               + QJL arrays.  3-bit indices are byte-aligned (wastes 2 bits
+               per byte: 0.5 bytes/coord instead of the theoretical 0.375).
+v3           — same layout as v2, but 3-bit indices are tightly packed
+               (8 indices → 3 bytes = 0.375 bytes/coord).  2-bit and 4-bit
+               layouts are identical in v2/v3 and remain round-trip
+               compatible.
 """
 from __future__ import annotations
 
@@ -49,7 +54,7 @@ from ._codebooks import get_codebook
 from ._rotation import padded_dim, rht
 
 _MAGIC = b"SNPV"
-_VERSION = 2
+_VERSION = 3  # v3: tight 3-bit packing (0.375 bytes/coord); see File format notes
 _FLAG_PROD = 0x1
 _FLAG_NORMALIZED = 0x2
 
@@ -119,10 +124,16 @@ class SnapIndex:
         self._centroids: NDArray[np.float32]
         self._centroids, _ = get_codebook(self._mse_bits)
 
-        # RAM bit-packing: pack when mse_bits evenly divides 8 (2-bit, 4-bit)
-        self._can_pack: bool = (8 % self._mse_bits == 0)
-        self._ipb: int = 8 // self._mse_bits if self._can_pack else 1
-        _pcols = self._pdim // self._ipb if self._can_pack else self._pdim
+        # RAM bit-packing.  We pack whenever (pdim * mse_bits) is a multiple
+        # of 8 — always true for pdim = 2^k with k >= 3 (pdim >= 8).
+        # For mse_bits ∈ {2, 4} we use byte-aligned packing (ipb per byte).
+        # For mse_bits = 3 we use tight packing (8 indices → 3 bytes).  Both
+        # layouts are row-contiguous, so the RAM buffer matches the on-disk
+        # bit-packed stream byte-for-byte (enabling zero-copy save/load).
+        self._can_pack: bool = (self._pdim * self._mse_bits) % 8 == 0
+        # _ipb only applies to byte-aligned modes; 0 marks the tight 3-bit path
+        self._ipb: int = 8 // self._mse_bits if (8 % self._mse_bits == 0) else 0
+        _pcols = (self._pdim * self._mse_bits) // 8 if self._can_pack else self._pdim
 
         # Core storage
         self._ids: list[Any] = []
@@ -147,14 +158,35 @@ class SnapIndex:
     # ──────────────────────────────────────────────────────────────────── #
 
     def _pack_matrix(self, mat: NDArray[np.uint8]) -> NDArray[np.uint8]:
-        """Pack (N, pdim) uint8 indices → (N, pdim // ipb) uint8 for RAM.
+        """Pack (N, pdim) uint8 indices → row-packed uint8 for RAM.
 
-        At 4-bit: 2 indices per byte.  At 2-bit: 4 indices per byte.
+        4-bit: 2 indices per byte.  2-bit: 4 per byte.
+        3-bit: tight packing of 8 indices → 3 bytes (0.375 bytes/coord).
         """
         bits = self._mse_bits
+        n = len(mat)
+        if bits == 3:
+            # Reshape rows into chunks of 8 indices; each chunk → 3 bytes.
+            chunks = mat.reshape(n, -1, 8).astype(np.uint32)
+            combined = (
+                chunks[..., 0]
+                | (chunks[..., 1] << 3)
+                | (chunks[..., 2] << 6)
+                | (chunks[..., 3] << 9)
+                | (chunks[..., 4] << 12)
+                | (chunks[..., 5] << 15)
+                | (chunks[..., 6] << 18)
+                | (chunks[..., 7] << 21)
+            )
+            out: NDArray[np.uint8] = np.empty(
+                (n, combined.shape[1], 3), dtype=np.uint8,
+            )
+            out[..., 0] = combined & 0xFF
+            out[..., 1] = (combined >> 8) & 0xFF
+            out[..., 2] = (combined >> 16) & 0xFF
+            return out.reshape(n, -1)
         ipb = self._ipb
         mask = (1 << bits) - 1
-        n = len(mat)
         packed: NDArray[np.uint8] = np.zeros(
             (n, self._pdim // ipb), dtype=np.uint8,
         )
@@ -174,12 +206,24 @@ class SnapIndex:
         if not self._can_pack:
             return packed
         bits = self._mse_bits
+        n = len(packed)
+        if bits == 3:
+            # Each row: 3*pdim/8 bytes → (pdim/8) chunks × 3 bytes → 8 indices
+            chunks = packed.reshape(n, -1, 3).astype(np.uint32)
+            combined = (
+                chunks[..., 0]
+                | (chunks[..., 1] << 8)
+                | (chunks[..., 2] << 16)
+            )
+            mat: NDArray[np.uint8] = np.empty(
+                (n, combined.shape[1], 8), dtype=np.uint8,
+            )
+            for i in range(8):
+                mat[..., i] = ((combined >> (i * 3)) & 0x7).astype(np.uint8)
+            return mat.reshape(n, -1)
         ipb = self._ipb
         mask = (1 << bits) - 1
-        n = len(packed)
-        mat: NDArray[np.uint8] = np.empty(
-            (n, packed.shape[1] * ipb), dtype=np.uint8,
-        )
+        mat = np.empty((n, packed.shape[1] * ipb), dtype=np.uint8)
         for i in range(ipb):
             mat[:, i::ipb] = ((packed >> (i * bits)) & mask).astype(np.uint8)
         return mat
@@ -534,7 +578,7 @@ class SnapIndex:
                 dim, bits, seed, n = struct.unpack("<IIII", f.read(16))
                 use_prod = False
                 normalized = False
-            elif version == 2:
+            elif version in (2, 3):
                 dim, bits, seed, n, flags = struct.unpack("<IIIII", f.read(20))
                 use_prod = bool(flags & _FLAG_PROD)
                 normalized = bool(flags & _FLAG_NORMALIZED)
@@ -545,18 +589,26 @@ class SnapIndex:
                       normalized=normalized)
             pdim = idx._pdim
             mse_bits = idx._mse_bits
+            # v1/v2 used byte-aligned 3-bit packing; v3 is tight.
+            legacy_3bit = (version < 3 and mse_bits == 3)
 
             (packed_len,) = struct.unpack("<I", f.read(4))
             data = f.read(packed_len)
-            if idx._can_pack:
-                # Disk bit-packing matches the RAM layout — read directly.
+            if idx._can_pack and not legacy_3bit:
+                # Disk layout matches RAM layout — read directly, no unpack.
+                packed_cols = (pdim * mse_bits) // 8
                 idx._indices = (
                     np.frombuffer(data, dtype=np.uint8)
-                    .reshape(n, pdim // idx._ipb)
+                    .reshape(n, packed_cols)
                     .copy()
                 )
             else:
-                idx._indices = _unpack(data, n, pdim, mse_bits)
+                unpacked = _unpack(
+                    data, n, pdim, mse_bits, legacy_3bit=legacy_3bit,
+                )
+                idx._indices = (
+                    idx._pack_matrix(unpacked) if idx._can_pack else unpacked
+                )
             idx._norms = np.frombuffer(f.read(n * 4), dtype=np.float32).copy()
 
             if use_prod and n > 0:
@@ -637,9 +689,34 @@ class SnapIndex:
 # ──────────────────────────────────────────────────────────────────────────── #
 
 def _pack(mat: NDArray[np.uint8], bits: int) -> bytes:
-    """Pack uint8 index matrix into a bit-packed byte string."""
+    """Pack uint8 index matrix into a bit-packed byte string.
+
+    2-bit and 4-bit: byte-aligned (ipb = 8 // bits indices per byte).
+    3-bit: tight packing (8 indices → 3 bytes = 24 bits), v3 format.
+    """
     if bits == 8:
         return mat.tobytes()
+    if bits == 3:
+        flat = mat.ravel()
+        pad = (-len(flat)) % 8
+        if pad:
+            flat = np.concatenate([flat, np.zeros(pad, dtype=np.uint8)])
+        chunks = flat.reshape(-1, 8).astype(np.uint32)
+        combined = (
+            chunks[:, 0]
+            | (chunks[:, 1] << 3)
+            | (chunks[:, 2] << 6)
+            | (chunks[:, 3] << 9)
+            | (chunks[:, 4] << 12)
+            | (chunks[:, 5] << 15)
+            | (chunks[:, 6] << 18)
+            | (chunks[:, 7] << 21)
+        )
+        out3 = np.empty((len(combined), 3), dtype=np.uint8)
+        out3[:, 0] = combined & 0xFF
+        out3[:, 1] = (combined >> 8) & 0xFF
+        out3[:, 2] = (combined >> 16) & 0xFF
+        return out3.tobytes()
     ipb = 8 // bits
     mask = (1 << bits) - 1
     flat = mat.ravel()
@@ -652,17 +729,34 @@ def _pack(mat: NDArray[np.uint8], bits: int) -> bytes:
     return out.tobytes()
 
 
-def _unpack(data: bytes, n_rows: int, n_cols: int, bits: int) -> NDArray[np.uint8]:
-    """Unpack bit-packed bytes back to uint8 matrix."""
+def _unpack(
+    data: bytes, n_rows: int, n_cols: int, bits: int, *, legacy_3bit: bool = False,
+) -> NDArray[np.uint8]:
+    """Unpack bit-packed bytes back to uint8 matrix.
+
+    ``legacy_3bit=True`` decodes the byte-aligned 3-bit layout used by the
+    v1 / v2 file formats (ipb = 2, wastes 2 bits per byte).  v3 files use
+    the default tight 3-bit layout.
+    """
+    total = n_rows * n_cols
     if bits == 8:
         result: NDArray[np.uint8] = (
             np.frombuffer(data, dtype=np.uint8).reshape(n_rows, n_cols).copy()
         )
         return result
+    if bits == 3 and not legacy_3bit:
+        arr = np.frombuffer(data, dtype=np.uint8)
+        n_chunks = len(arr) // 3
+        chunks = arr.reshape(n_chunks, 3).astype(np.uint32)
+        combined = chunks[:, 0] | (chunks[:, 1] << 8) | (chunks[:, 2] << 16)
+        out8 = np.empty((n_chunks, 8), dtype=np.uint8)
+        for i in range(8):
+            out8[:, i] = ((combined >> (i * 3)) & 0x7).astype(np.uint8)
+        return out8.ravel()[:total].reshape(n_rows, n_cols).copy()
+    # Byte-aligned path: 2-bit, 4-bit, and legacy 3-bit (v1/v2)
     ipb = 8 // bits
     mask = (1 << bits) - 1
     packed: NDArray[np.uint8] = np.frombuffer(data, dtype=np.uint8)
-    total = n_rows * n_cols
     out: NDArray[np.uint8] = np.zeros(len(packed) * ipb, dtype=np.uint8)
     for i in range(ipb):
         out[i::ipb] = (packed >> (i * bits)) & mask

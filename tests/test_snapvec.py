@@ -164,6 +164,44 @@ class TestPersistence:
         results = idx2.search(vecs[3], k=5)
         assert 3 in [r[0] for r in results]
 
+    def test_legacy_v2_3bit_file_loads_via_compat_decoder(self, tmp_path):
+        """Pre-v0.3 files wrote 3-bit indices in byte-aligned form (ipb=2).
+
+        The v0.3 reader must detect version < 3 and decode with the legacy
+        path, then re-pack into the new tight RAM layout.
+        """
+        import struct
+        from snapvec._index import _MAGIC
+
+        idx = SnapIndex(dim=128, bits=3)
+        vecs = _rand(15, dim=128)
+        idx.add_batch(list(range(15)), vecs)
+        unpacked = idx._unpack_to_indices()
+
+        # Re-pack using the legacy byte-aligned algorithm (what v0.2.x wrote).
+        flat = unpacked.ravel()
+        ipb, mask = 2, 7
+        packed_legacy = np.zeros(len(flat) // ipb, dtype=np.uint8)
+        for i in range(ipb):
+            packed_legacy |= (flat[i::ipb] & mask).astype(np.uint8) << (i * 3)
+
+        path = tmp_path / "legacy.snpv"
+        with open(path, "wb") as f:
+            f.write(_MAGIC)
+            f.write(struct.pack("<IIIIII", 2, 128, 3, 0, 15, 0))  # version=2
+            f.write(struct.pack("<I", len(packed_legacy)))
+            f.write(packed_legacy.tobytes())
+            f.write(idx._norms.tobytes())
+            for i in range(15):
+                enc = str(i).encode("utf-8")
+                f.write(struct.pack("<H", len(enc)))
+                f.write(enc)
+
+        loaded = SnapIndex.load(path)
+        np.testing.assert_array_equal(unpacked, loaded._unpack_to_indices())
+        results = loaded.search(vecs[5], k=3)
+        assert results[0][0] == 5
+
     def test_wrong_magic_raises(self, tmp_path):
         path = tmp_path / "bad.snpv"
         path.write_bytes(b"XXXX" + b"\x00" * 20)
@@ -275,12 +313,26 @@ class TestRamPacking:
         idx.add_batch(list(range(5)), _rand(5))
         assert idx._indices.shape == (5, idx._pdim // 4)
 
-    def test_unpacked_indices_at_3bit(self):
-        """3-bit indices cannot pack evenly into bytes; stay as uint8."""
+    def test_tight_packed_indices_at_3bit(self):
+        """3-bit uses tight packing in RAM: 8 indices → 3 bytes."""
         idx = SnapIndex(dim=DIM, bits=3)
         idx.add_batch(list(range(5)), _rand(5))
-        assert idx._can_pack is False
-        assert idx._indices.shape == (5, idx._pdim)
+        assert idx._can_pack is True
+        # Each row: pdim indices × 3 bits / 8 = 3*pdim/8 bytes
+        assert idx._indices.shape == (5, (idx._pdim * 3) // 8)
+
+    def test_tight_3bit_roundtrip_correctness(self):
+        """Pack → unpack must recover the original indices exactly."""
+        idx = SnapIndex(dim=DIM, bits=3)
+        idx.add_batch(list(range(20)), _rand(20))
+        unpacked = idx._unpack_to_indices()
+        repacked = idx._pack_matrix(unpacked)
+        np.testing.assert_array_equal(idx._indices, repacked)
+        # And disk-level round-trip
+        from snapvec._index import _pack, _unpack
+        raw = _pack(unpacked, 3)
+        recovered = _unpack(raw, 20, idx._pdim, 3)
+        np.testing.assert_array_equal(unpacked, recovered)
 
     def test_packed_search_top1_is_self(self):
         """Packed-index search should still find query as nearest neighbor."""
