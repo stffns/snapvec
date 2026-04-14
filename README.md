@@ -18,15 +18,43 @@ from snapvec import SnapIndex
 
 # Build index
 idx = SnapIndex(dim=384, bits=4)          # 4-bit, ~6x compression
+# ⚠ pass float32 arrays — see "Input dtype" below
+embeddings = np.asarray(embeddings, dtype=np.float32)
 idx.add_batch(ids=list(range(N)), vectors=embeddings)
 
 # Query
-results = idx.search(query_vector, k=10)     # [(id, score), ...]
+results = idx.search(query_vector.astype(np.float32), k=10)  # [(id, score), ...]
 
 # Persist
 idx.save("my_index.snpv")
 idx2 = SnapIndex.load("my_index.snpv")   # atomic save, v1/v2 compatible
 ```
+
+### Input dtype: pass `np.float32`
+
+`add_batch`, `add`, and `search` accept any array-like input but cast
+internally to `float32`. **If you pass `float64` (the NumPy default),
+a full-size temporary copy is allocated during the cast** — for
+`add_batch(1M × 384)` that's a transient 1.5 GB allocation on top of
+your input array, gone only after quantization completes.
+
+To avoid this:
+
+```python
+# Models that return float32 directly (most modern embeddings)
+embeddings = model.encode(texts)             # already float32 → no copy
+idx.add_batch(ids, embeddings)
+
+# Arrays from np.array([...]) default to float64 — cast explicitly
+embeddings = np.asarray(my_list, dtype=np.float32)   # cast once upfront
+idx.add_batch(ids, embeddings)
+
+# Loading from disk — respect the original dtype or force float32
+embeddings = np.load("vecs.npy").astype(np.float32, copy=False)
+```
+
+The cast is a correctness convenience, not a design choice — the whole
+pipeline (normalize, RHT, quantize) operates in `float32`.
 
 ---
 
@@ -243,6 +271,12 @@ idx.stats() -> dict                           # Compression / memory diagnostics
 len(idx)                                      # Number of stored vectors
 repr(idx)                                     # SnapIndex(dim=384, bits=4, mode=mse, n=1000)
 ```
+
+> **All vector inputs should be `np.float32`.** Passing `float64` triggers
+> a full-size temporary cast inside `add_batch` / `search` (see "Input
+> dtype" in Quick start). Most embedding models already return `float32`;
+> only ad-hoc arrays built from Python lists via `np.array(...)` default
+> to `float64`.
 
 ---
 
