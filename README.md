@@ -2,7 +2,7 @@
 
 **Fast compressed approximate nearest-neighbor search.  Pure NumPy.  No heavy dependencies.**
 
-`snapvec` implements the TurboQuant compression pipeline — randomized Hadamard transform followed by optimal Gaussian scalar quantization (Lloyd-Max) — as a self-contained Python library for embedding vector search.  It achieves **8–12× compression** with **>0.92 recall@10** against float32 brute-force, using only NumPy.
+`snapvec` implements the TurboQuant compression pipeline — randomized Hadamard transform followed by optimal Gaussian scalar quantization (Lloyd-Max) — as a self-contained Python library for embedding vector search.  It achieves **~6× compression at 4-bit / ~12× at 2-bit** (disk and RAM) with **>0.92 recall@10** against float32 brute-force, using only NumPy.
 
 ```
 pip install snapvec
@@ -17,7 +17,7 @@ import numpy as np
 from snapvec import SnapIndex
 
 # Build index
-idx = SnapIndex(dim=384, bits=4)          # 4-bit, ~8x compression
+idx = SnapIndex(dim=384, bits=4)          # 4-bit, ~6x compression
 idx.add_batch(ids=list(range(N)), vectors=embeddings)
 
 # Query
@@ -82,14 +82,16 @@ and assigns each the conditional mean as reconstruction value.
 These boundaries and centroids are precomputed and hardcoded in `snapvec._codebooks`
 (no scipy required at runtime):
 
-| bits | levels | distortion (MSE) | bytes/coord (disk) |
-|------|--------|------------------|--------------------|
-| 2    | 4      | 0.1175           | 0.25               |
-| 3    | 8      | 0.0311           | 0.375              |
-| 4    | 16     | 0.0077           | 0.50               |
+| bits | levels | distortion (MSE) | bytes/coord (theoretical) | bytes/coord (actual) |
+|------|--------|------------------|---------------------------|----------------------|
+| 2    | 4      | 0.1175           | 0.25                      | 0.25                 |
+| 3    | 8      | 0.0311           | 0.375                     | 0.50 ⚠︎              |
+| 4    | 16     | 0.0077           | 0.50                      | 0.50                 |
 
-The quantized vector is stored as a `uint8` index matrix, bit-packed to `b/8`
-bytes per coordinate on disk.
+The quantized vector is stored as a `uint8` index matrix, bit-packed to
+`b/8` bytes per coordinate on disk when `b` evenly divides 8. At 3-bit the
+current packer is byte-aligned and wastes 2 bits per byte (see the
+"Compression ratios" section below).
 
 #### Step 4 — Approximate inner product
 
@@ -135,23 +137,34 @@ This follows from Lemma 4 of Zandieh et al. (2025):
 
 ### Compression ratios
 
-For N vectors of dimension `d = 384` (BGE-small):
+Measured on `d = 384` (BGE-small); the RHT pads to the next power of 2 so
+`padded_dim = 512`. All per-vector byte counts below include the padded
+dimensions — they are the numbers you actually pay in RAM and on disk.
+The trailing `+ 4` is the float32 norm; in `normalized=True` mode it is
+still persisted (as 1.0) to keep the on-disk layout stable across modes.
 
-| Backend        | Bytes/vector (disk) | Bytes/vector (RAM, idle) | Ratio vs float32 |
-|----------------|---------------------|--------------------------|------------------|
-| float32        | 1 536               | 1 536                    | 1.0×             |
-| 4-bit snapvec  | 192 + 4             | 256 + 4                  | **7.9× / 5.9×**  |
-| 3-bit snapvec  | 144 + 4             | 512 + 4                  | **10.4× / 3.0×** |
-| 2-bit snapvec  | 96 + 4              | 128 + 4                  | **15.4× / 11.6×**|
-| int8 (naïve)   | 384 + 4             | 384 + 4                  | 3.9×             |
+| Backend        | Bytes/vec (disk) | Bytes/vec (RAM, idle) | Disk ratio | RAM ratio |
+|----------------|------------------|-----------------------|------------|-----------|
+| float32        | 1 536            | 1 536                 | 1.0×       | 1.0×      |
+| 4-bit snapvec  | 256 + 4          | 256 + 4               | **5.9×**   | **5.9×**  |
+| 3-bit snapvec  | 256 + 4 ⚠︎       | 512 + 4               | **5.9×** ⚠︎| **3.0×**  |
+| 2-bit snapvec  | 128 + 4          | 128 + 4               | **11.6×**  | **11.6×** |
+| int8 (naïve)   | 384 + 4          | 384 + 4               | 4.0×       | 4.0×      |
 
-The 4-byte overhead is the per-vector norm. **RAM indices are bit-packed** when
-`bits` evenly divides 8 (2-bit: 4 per byte, 4-bit: 2 per byte); 3-bit falls back
-to uint8 storage. Bit-packing also applies on disk for all bit widths.
+⚠︎ **3-bit note:** Current `_pack` is byte-aligned (ipb = ⌊8/3⌋ = 2), so 3-bit
+indices waste 2 bits per byte on disk — giving the same 0.5 bytes/coord as
+4-bit instead of the theoretical 0.375. Choose 4-bit for better recall at
+equal storage, or 2-bit for genuinely smaller footprint. True tight
+3-bit packing is on the roadmap.
 
-During active search, a lazy `float16` centroid cache (`2·padded_dim` bytes/vec)
-is materialised for fast matmul; it is evicted on writes and can be avoided
-entirely via `chunk_size` for memory-constrained deployments.
+**RAM packing:** 2-bit and 4-bit indices are bit-packed in RAM (unpacked
+lazily when the `float16` cache is built — zero impact on warm query
+latency). 3-bit falls back to plain `uint8` until tight packing lands.
+
+**Search cache:** a lazy `float16` centroid expansion of shape
+`(N, padded_dim)` is materialised on first query for fast matmul (~5 ms
+at N = 100 k). It is evicted on writes and can be avoided entirely via
+`chunk_size` for memory-constrained deployments.
 
 ---
 
@@ -273,6 +286,12 @@ what's already fast.
 
 ### Pure-Python improvements (no new dependencies)
 
+- **Tight 3-bit packing** — the current `_pack` is byte-aligned and wastes
+  2 bits per byte at 3-bit (ipb = ⌊8/3⌋ = 2). Packing 8 three-bit values
+  across 3 bytes would restore the theoretical 0.375 bytes/coord — a
+  25% disk reduction for the 3-bit mode and a meaningful gap between
+  "smaller but less accurate" (2-bit) and "larger but more accurate"
+  (4-bit) options.
 - **Vectorized FWHT** — replace the Python-level butterfly loop in
   `_rotation._fwht_inplace` with reshape-based NumPy operations.
   Expected: ~10–20× speedup on the RHT step (0.47 ms → ~0.03 ms at d=512),
