@@ -37,6 +37,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from ._kmeans import assign_l2, kmeans_mse, probe_scores_l2_monotone
 from ._rotation import padded_dim, rht
 
 _MAGIC = b"SNPI"
@@ -60,52 +61,6 @@ def _decode_id(raw: str) -> Any:
             return float(raw)
         except ValueError:
             return raw
-
-
-# ──────────────────────────────────────────────────────────────────── #
-# K-means primitives (private, mirror _pq.py to keep modules decoupled) #
-# ──────────────────────────────────────────────────────────────────── #
-
-def _kmeans_pp_init(
-    X: NDArray[np.float32], K: int, rng: np.random.Generator,
-) -> NDArray[np.float32]:
-    n = X.shape[0]
-    centers = [X[int(rng.integers(n))]]
-    d2 = ((X - centers[0]) ** 2).sum(1)
-    for _ in range(1, K):
-        total = d2.sum()
-        p = d2 / total if total > 1e-12 else np.full(n, 1.0 / n)
-        nxt = int(rng.choice(n, p=p))
-        centers.append(X[nxt])
-        d2 = np.minimum(d2, ((X - centers[-1]) ** 2).sum(1))
-    return np.stack(centers).astype(np.float32)
-
-
-def _kmeans_mse(
-    X: NDArray[np.float32], K: int, n_iters: int, seed: int,
-) -> NDArray[np.float32]:
-    rng = np.random.default_rng(seed)
-    C = _kmeans_pp_init(X, K, rng)
-    x_sq = (X ** 2).sum(1, keepdims=True)
-    for _ in range(n_iters):
-        d2 = x_sq - 2 * X @ C.T + (C ** 2).sum(1)[None, :]
-        asn = d2.argmin(1)
-        newC = np.empty_like(C)
-        for k in range(K):
-            m = asn == k
-            if m.any():
-                newC[k] = X[m].mean(0)
-            else:
-                newC[k] = X[d2.min(1).argmax()]
-        if np.allclose(newC, C, atol=1e-5):
-            return newC
-        C = newC
-    return C
-
-
-def _assign(X: NDArray[np.float32], C: NDArray[np.float32]) -> NDArray[np.int64]:
-    d2 = (X ** 2).sum(1, keepdims=True) - 2 * X @ C.T + (C ** 2).sum(1)[None, :]
-    return d2.argmin(1)
 
 
 # ──────────────────────────────────────────────────────────────────── #
@@ -251,15 +206,15 @@ class IVFPQSnapIndex:
             )
         pre, _ = self._preprocess(arr)
         # 1. Coarse k-means.
-        self._coarse = _kmeans_mse(
+        self._coarse = kmeans_mse(
             pre, self.nlist, n_iters=kmeans_iters, seed=self.seed,
         )
         # 2. Shared residual codebooks (trained on pooled residuals).
-        asn = _assign(pre, self._coarse)
+        asn = assign_l2(pre, self._coarse)
         residuals = pre - self._coarse[asn]
         for j in range(self.M):
             Rj = residuals[:, j * self._d_sub : (j + 1) * self._d_sub].astype(np.float32)
-            self._codebooks[j] = _kmeans_mse(
+            self._codebooks[j] = kmeans_mse(
                 Rj, self.K, n_iters=kmeans_iters, seed=self.seed + 1000 + j,
             )
         self._fitted = True
@@ -291,9 +246,20 @@ class IVFPQSnapIndex:
                 f"ids and vectors must have the same length; "
                 f"got {len(ids)} ids and {len(arr)} vectors"
             )
+        # Reject duplicates up front — both within the batch and
+        # against ids already indexed.  Silently accepting them would
+        # let search return the wrong vector (the dict collapses the
+        # earlier row) even though the codes array still stores it.
+        seen_in_batch: set[Any] = set()
+        for id_val in ids:
+            if id_val in seen_in_batch:
+                raise ValueError(f"duplicate id in batch: {id_val!r}")
+            seen_in_batch.add(id_val)
+            if id_val in self._id_to_row:
+                raise ValueError(f"id already indexed: {id_val!r}")
 
         pre, norms = self._preprocess(arr)
-        asn_new = _assign(pre, self._coarse)
+        asn_new = assign_l2(pre, self._coarse)
         residuals = pre - self._coarse[asn_new]
         new_codes = np.empty((len(arr), self.M), dtype=np.uint8)
         for j in range(self.M):
@@ -389,8 +355,15 @@ class IVFPQSnapIndex:
             return []
         q_pre = self._preprocess_single(q)
 
-        coarse_scores = self._coarse @ q_pre          # (nlist,)
-        probe = np.argpartition(-coarse_scores, nprobe - 1)[:nprobe]
+        # Rank clusters by L2-monotone score (matches the metric used
+        # during assignment — plain ⟨q, c⟩ would be wrong because
+        # coarse centroids are means of unit vectors so ‖c‖ varies).
+        # For scoring probed vectors we still use ⟨q, centroid_c⟩ as
+        # the additive offset, since the decoded vector is
+        # centroid_c + decoded_residual and we score ⟨q, decoded⟩.
+        probe_ranking = probe_scores_l2_monotone(self._coarse, q_pre)
+        coarse_dot = self._coarse @ q_pre          # (nlist,)
+        probe = np.argpartition(-probe_ranking, nprobe - 1)[:nprobe]
 
         # Per-subspace residual LUT.
         lut = np.empty((self.M, self.K), dtype=np.float32)
@@ -408,23 +381,22 @@ class IVFPQSnapIndex:
         # Contiguous gather: one concatenation, one sum.
         cat = np.empty((total, self.M), dtype=np.uint8)
         row_idx = np.empty(total, dtype=np.int64)
+        scores = np.empty(total, dtype=np.float32)
         cursor = 0
-        coarse_rep = np.empty(total, dtype=np.float32)
         for s, e, c in zip(starts.tolist(), ends.tolist(), probe.tolist()):
             n_c = e - s
             if n_c == 0:
                 continue
             cat[cursor : cursor + n_c] = self._codes[s:e]
             row_idx[cursor : cursor + n_c] = np.arange(s, e, dtype=np.int64)
-            coarse_rep[cursor : cursor + n_c] = coarse_scores[c]
+            scores[cursor : cursor + n_c] = coarse_dot[c]
             cursor += n_c
 
-        scores = coarse_rep.copy()
         for j in range(self.M):
             scores += lut[j][cat[:, j]]
 
         if not self.normalized:
-            scores = scores * self._norms[row_idx]
+            scores *= self._norms[row_idx]
 
         k_eff = min(k, total)
         top = np.argpartition(-scores, k_eff - 1)[:k_eff]
@@ -547,6 +519,26 @@ class IVFPQSnapIndex:
             idx._offsets = (
                 np.frombuffer(f.read((nlist + 1) * 8), dtype=np.int64).copy()
             )
+            # Validate offsets: length, monotone non-decreasing,
+            # boundary values.  Corrupted or truncated files would
+            # otherwise index into wrong ranges of _codes at search
+            # time and silently return garbage.
+            if idx._offsets.shape != (nlist + 1,):
+                raise ValueError(
+                    f"offsets length {idx._offsets.shape} does not match "
+                    f"nlist+1 = {nlist + 1}"
+                )
+            if int(idx._offsets[0]) != 0:
+                raise ValueError(
+                    f"offsets[0] must be 0; got {int(idx._offsets[0])}"
+                )
+            if int(idx._offsets[-1]) != n:
+                raise ValueError(
+                    f"offsets[-1] must equal n={n}; got "
+                    f"{int(idx._offsets[-1])}"
+                )
+            if np.any(np.diff(idx._offsets) < 0):
+                raise ValueError("offsets must be non-decreasing")
             idx._fitted = True
             if n > 0:
                 idx._codes = (

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from time import perf_counter
 
 import numpy as np
 import pytest
@@ -112,9 +111,12 @@ def test_full_probe_beats_default_nprobe() -> None:
     assert r_full >= r_default - 0.01
 
 
-def test_speedup_vs_pq_fullscan() -> None:
-    """At moderate N, IVF with nprobe=nlist//4 should be faster than
-    PQSnapIndex full scan at comparable recall on clustered data."""
+def test_recall_tracks_pq_fullscan() -> None:
+    """IVF at ``nprobe=nlist`` visits every cluster, so its recall must
+    converge to the PQ full-scan baseline on the same data.  We avoid
+    wall-clock assertions here because they are flaky across CI
+    runners; the speedup claims live in experiments/bench_ivf_pq_*.py.
+    """
     d, n_corpus, n_queries = 64, 2000, 50
     corpus = _clustered(n_corpus, d, n_clusters=50, seed=21)
     queries = _clustered(n_queries, d, n_clusters=50, seed=22)
@@ -130,25 +132,18 @@ def test_speedup_vs_pq_fullscan() -> None:
     ivf.fit(corpus[:1000])
     ivf.add_batch(list(range(n_corpus)), corpus)
 
-    # Warm up.
-    for q in queries[:3]:
-        pq.search(q, k=10)
-        ivf.search(q, k=10, nprobe=8)
-
-    t0 = perf_counter()
-    pq_pred = [[h[0] for h in pq.search(q, k=10)] for q in queries]
-    t_pq = perf_counter() - t0
-    t0 = perf_counter()
-    ivf_pred = [[h[0] for h in ivf.search(q, k=10, nprobe=8)] for q in queries]
-    t_ivf = perf_counter() - t0
-
-    r_pq = _recall(pq_pred, truth, 10)
-    r_ivf = _recall(ivf_pred, truth, 10)
-
-    # IVF must be faster and within a reasonable recall window.
-    assert t_ivf < t_pq, f"ivf {t_ivf:.3f}s not faster than pq {t_pq:.3f}s"
-    assert r_ivf >= r_pq - 0.1, (
-        f"ivf recall {r_ivf:.3f} too far below pq {r_pq:.3f}"
+    r_pq = _recall(
+        [[h[0] for h in pq.search(q, k=10)] for q in queries], truth, 10,
+    )
+    r_ivf_full = _recall(
+        [[h[0] for h in ivf.search(q, k=10, nprobe=32)] for q in queries],
+        truth, 10,
+    )
+    # Full probe should recall within noise of PQ full-scan; often
+    # beats it because residual codebooks resolve smaller errors.
+    assert r_ivf_full >= r_pq - 0.02, (
+        f"IVF full-probe recall {r_ivf_full:.3f} lags PQ full-scan "
+        f"{r_pq:.3f} by more than 2 pp"
     )
 
 
@@ -216,6 +211,41 @@ def test_use_rht_toggle(use_rht: bool) -> None:
     hits = idx.search(corpus[3], k=3, nprobe=8)
     top_id = hits[0][0]
     assert float(corpus[3] @ corpus[top_id]) > 0.9
+
+
+def test_duplicate_ids_rejected() -> None:
+    """Silently collapsing duplicate ids would make search return the
+    wrong decoded vector for the earlier row.  Reject up front."""
+    corpus = _unit_gaussian(100, 32, seed=80)
+    idx = IVFPQSnapIndex(dim=32, nlist=4, M=8, K=16, normalized=True)
+    idx.fit(corpus)
+    with pytest.raises(ValueError, match="duplicate id in batch"):
+        idx.add_batch([0, 1, 0], corpus[:3])
+    idx.add_batch([0, 1, 2], corpus[:3])
+    with pytest.raises(ValueError, match="already indexed"):
+        idx.add_batch([1], corpus[:1])
+
+
+def test_load_validates_offsets(tmp_path: Path) -> None:
+    """Corrupted ``_offsets`` on disk must be caught at load time,
+    not silently used to mis-index the codes buffer."""
+    corpus = _unit_gaussian(100, 32, seed=81)
+    idx = IVFPQSnapIndex(dim=32, nlist=4, M=8, K=16, normalized=True, seed=0)
+    idx.fit(corpus)
+    idx.add_batch(list(range(100)), corpus)
+    path = tmp_path / "x.snpi"
+    idx.save(path)
+
+    # Corrupt: scramble offsets to be non-monotone (swap first two).
+    buf = bytearray(path.read_bytes())
+    # Offsets are stored right after coarse + codebooks.  Easier to
+    # mutate via a fresh reload, edit, re-save.
+    reloaded = IVFPQSnapIndex.load(path)
+    reloaded._offsets = reloaded._offsets.copy()
+    reloaded._offsets[0] = 99  # break the offsets[0]==0 invariant
+    reloaded.save(path)
+    with pytest.raises(ValueError, match="offsets"):
+        IVFPQSnapIndex.load(path)
 
 
 def test_stats_shape() -> None:

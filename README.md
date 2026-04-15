@@ -100,7 +100,7 @@ idx = IVFPQSnapIndex(dim=384, nlist=256, M=192, K=256, normalized=True)
 idx.fit(training_vectors.astype(np.float32))
 idx.add_batch(ids=list(range(N)), vectors=corpus.astype(np.float32))
 
-# nprobe trades recall for latency. Defaults to nlist // 16.
+# nprobe trades recall for latency. Defaults to max(1, nlist // 16).
 results = idx.search(query.astype(np.float32), k=10, nprobe=16)
 
 idx.save("my_index.snpi")
