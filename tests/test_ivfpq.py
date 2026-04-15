@@ -84,6 +84,36 @@ def test_nprobe_default_and_bounds() -> None:
         idx.search(corpus[0], k=1, nprobe=33)
 
 
+def test_fit_warns_when_n_train_below_30x_nlist() -> None:
+    """Standard FAISS sizing is ≥ 30 training samples per cluster.
+    Below this, fit() should emit a UserWarning pointing to the
+    actual ratio + recommended size."""
+    import warnings
+
+    corpus = _unit_gaussian(200, 32, seed=90)
+    idx = IVFPQSnapIndex(dim=32, nlist=10, M=8, K=16, normalized=True)
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        idx.fit(corpus)
+    assert any("training vectors" in str(w.message) for w in captured), (
+        f"no fit() warning raised at n_train=200, nlist=10 "
+        f"(ratio 20 < 30); got {[str(w.message) for w in captured]}"
+    )
+
+
+def test_fit_does_not_warn_at_healthy_ratio() -> None:
+    import warnings
+
+    corpus = _unit_gaussian(400, 32, seed=91)   # 400 / 8 = 50 ≥ 30
+    idx = IVFPQSnapIndex(dim=32, nlist=8, M=8, K=16, normalized=True)
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        idx.fit(corpus)
+    assert not any("training vectors" in str(w.message) for w in captured), (
+        "unexpected fit() warning at n_train=400, nlist=8 (ratio 50 ≥ 30)"
+    )
+
+
 def test_full_probe_beats_default_nprobe() -> None:
     """With ``nprobe == nlist`` we scan every cluster; recall should
     converge to the PQSnapIndex full-scan baseline (same M/K, same

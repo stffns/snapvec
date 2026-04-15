@@ -128,6 +128,20 @@ On BGE-small (N = 20 000, `M=192`, `K=256`, `nlist=256`) vs. `PQSnapIndex` full-
 
 Residual encoding (stored codes are for `x − centroid_c` rather than `x` itself) lets the IVF configuration **exceed** full-scan recall at `nprobe ≥ nlist / 8` because per-cluster residuals have smaller variance than globally-centred vectors.  See `experiments/bench_ivf_pq_contiguous.py` for the sweep.
 
+### Sizing `nlist` and the training set
+
+Two simple rules from FAISS that snapvec follows literally:
+
+- **`nlist ≈ 4·√N`** is a good starting point.  For N = 20 k that is 256; for N = 1 M that is 4 096.
+- **`n_train ≥ 30 · nlist`** for the coarse k-means to be stable.  Fewer training samples leave many clusters empty or under-trained, and recall stops responding to `nprobe` (we saw this on the v0.5 N=1M baseline: 50 k train at nlist=4 096 → ratio of 12, recall pinned at 0.731 across all `nprobe`).  `IVFPQSnapIndex.fit()` emits a `UserWarning` when this ratio is violated.
+
+| N | suggested `nlist` | minimum `n_train` |
+|---:|---:|---:|
+| 10 000 | 256 | 7 680 |
+| 100 000 | 1 024 | 30 720 |
+| 1 000 000 | 4 096 | 122 880 |
+| 10 000 000 | 16 384 | 491 520 |
+
 ### Why `PQSnapIndex` defaults to `use_rht=False`
 
 The Randomized Hadamard Transform (RHT) is essential for *scalar* quantization: it Gaussianizes each coordinate so that a single fixed Lloyd-Max codebook is optimal regardless of the input distribution.  That is the entire point of `SnapIndex`.
