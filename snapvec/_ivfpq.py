@@ -29,7 +29,6 @@ worth it).  Classic FAISS rule-of-thumb ``nlist ≈ 4·√N``.
 """
 from __future__ import annotations
 
-import os
 import struct
 import threading
 import warnings
@@ -862,12 +861,13 @@ class IVFPQSnapIndex(FreezableIndex):
             idx = np.argpartition(-restricted, nprobe - 1, axis=1)[:, :nprobe]
             probes = allowed_clusters[idx]                     # (B, nprobe)
 
-        # One einsum, the whole batch's residual LUTs.
+        # Matmul instead of einsum for the whole batch's residual LUTs.
         # codebooks: (M, K, d_sub).  q split: (B, M, d_sub).
         q_split = q_pre_all.reshape(B, self.M, self._d_sub)
-        lut_batch = np.einsum(
-            "bjs,jks->bjk", q_split, self._codebooks,
-        ).astype(np.float32)                                    # (B, M, K)
+        q_split_t = np.transpose(q_split, (1, 0, 2))            # (M, B, d_sub)
+        cb_t = np.transpose(self._codebooks, (0, 2, 1))         # (M, d_sub, K)
+        lut_batch_t = q_split_t @ cb_t                          # (M, B, K)
+        lut_batch = np.transpose(lut_batch_t, (1, 0, 2)).astype(np.float32) # (B, M, K)
 
         results: list[list[tuple[Any, float]]] = [[] for _ in range(B)]
 

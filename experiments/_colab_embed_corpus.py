@@ -22,7 +22,8 @@ the near-duplicate artefact.
 """
 # %% [install]
 # Run-once cell.  Re-running is harmless.
-import subprocess, sys
+import subprocess
+import sys
 
 subprocess.check_call([
     sys.executable, "-m", "pip", "install", "-q",
