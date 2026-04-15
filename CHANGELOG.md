@@ -6,6 +6,30 @@ the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added (v0.8 WIP)
+
+- **`FreezableIndex` mixin** — every index class gains `idx.freeze()`
+  / `idx.unfreeze()` / `idx.frozen`.  After freezing, every mutator
+  (`add`, `add_batch`, `delete`, `fit`, `close`) raises
+  `RuntimeError` with a message that names the operation, so
+  concurrent `search()` from multiple threads is race-free by
+  contract — no hot-path lock needed.
+- **`IVFPQSnapIndex.search_batch` is now thread-safe under
+  concurrent callers.**  A `threading.Lock` serialises the lazy
+  `ThreadPoolExecutor` init so two concurrent
+  `search_batch(num_threads > 1)` callers cannot both race through
+  `if _executor is None` and leak a pool.
+- **`IVFPQSnapIndex.search(..., filter_ids=...)` /
+  `search_batch(..., filter_ids=...)`** — id-whitelist filtering
+  for IVF-PQ, cluster- and pool-aware.  The probe ranking is
+  restricted to clusters that contain at least one filter row
+  (sparse filters skip clusters entirely) and the row-level mask
+  is applied before the top-k / rerank-pool selection, so the
+  rerank candidate pool is drawn from the filtered subset — no
+  wasted pool slots on out-of-filter ids.  Unknown ids in the
+  filter are silently dropped; an entirely-unknown filter returns
+  `[]` immediately.
+
 ## [0.7.1] — 2026-04-15
 
 Test-correctness patch.  No behaviour change to the shipped fp16

@@ -459,12 +459,63 @@ class IVFPQSnapIndex(FreezableIndex):
     # search                                                            #
     # ──────────────────────────────────────────────────────────────── #
 
+    def _resolve_filter(
+        self, filter_ids: set[Any]
+    ) -> tuple[NDArray[np.int64], NDArray[np.int64]] | None:
+        """Translate an external-id filter set into ``(filter_rows, allowed_clusters)``.
+
+        ``filter_rows`` is a sorted int64 array of internal row ids; the
+        gather path uses ``np.isin(row_idx, filter_rows, assume_unique=True)``
+        to drop non-filter candidates.  Keeping it sparse (vs a dense
+        N-bool mask) avoids an O(N) allocation per query, which matters
+        at scale: at N=100M a dense bool is 100 MB per call.
+        ``allowed_clusters`` is the set of coarse clusters that contain
+        at least one filter row; used to restrict the probe ranking so
+        no ``nprobe`` slot is wasted on a cluster that cannot contribute
+        a hit.
+
+        Returns ``None`` when the filter yields zero ids present in the
+        index (either because the caller passed an empty set or because
+        every id is unknown); the caller then short-circuits to ``[]``.
+        """
+        filter_rows = np.fromiter(
+            (self._id_to_row[i] for i in filter_ids if i in self._id_to_row),
+            dtype=np.int64,
+        )
+        if filter_rows.size == 0:
+            return None
+        filter_rows.sort()
+        # Row r belongs to the smallest cluster c for which offsets[c+1] > r,
+        # which is exactly searchsorted(offsets[1:], r, side='right').
+        allowed_clusters = np.unique(
+            np.searchsorted(self._offsets[1:], filter_rows, side="right")
+        ).astype(np.int64)
+        return filter_rows, allowed_clusters
+
+    @staticmethod
+    def _probe_topn(
+        ranking: NDArray[np.float32],
+        nprobe: int,
+        allowed: NDArray[np.int64] | None = None,
+    ) -> NDArray[np.int64]:
+        """Top-``nprobe`` clusters by ``ranking``, optionally restricted to
+        ``allowed``.  When ``allowed`` is shorter than ``nprobe`` we return
+        all of it (every contributing cluster gets probed)."""
+        if allowed is None:
+            return np.argpartition(-ranking, nprobe - 1)[:nprobe].astype(np.int64)
+        if len(allowed) <= nprobe:
+            return allowed
+        restricted = ranking[allowed]
+        top = np.argpartition(-restricted, nprobe - 1)[:nprobe]
+        return allowed[top].astype(np.int64)
+
     def search(
         self,
         query: NDArray[np.float32],
         k: int = 10,
         nprobe: int | None = None,
         rerank_candidates: int | None = None,
+        filter_ids: set[Any] | None = None,
     ) -> list[tuple[Any, float]]:
         """Approximate top-k via IVF probing + residual PQ ADC.
 
@@ -489,6 +540,18 @@ class IVFPQSnapIndex(FreezableIndex):
 
             Requires ``keep_full_precision=True`` at index construction.
             Must be ``>= k``.
+        filter_ids : set | None, default None
+            When provided, restrict results to ids in the set.  The
+            implementation is cluster- and pool-aware: the probe ranking
+            is restricted to clusters that contain at least one filter
+            row (so sparse filters skip clusters entirely), and the
+            row-level mask is applied before the top-k / rerank-pool
+            selection (so the rerank candidate pool is drawn from the
+            filtered subset, not from the unfiltered probe output).
+
+            Unknown ids in ``filter_ids`` are silently dropped.  An
+            entirely-unknown filter returns ``[]``.  A very sparse
+            filter may need a larger ``nprobe`` to surface ``k`` hits.
         """
         self._require_fitted()
         if k < 1:
@@ -514,6 +577,15 @@ class IVFPQSnapIndex(FreezableIndex):
         q = np.asarray(query, dtype=np.float32)
         if float(np.linalg.norm(q)) < 1e-10:
             return []
+
+        filter_rows: NDArray[np.int64] | None = None
+        allowed_clusters: NDArray[np.int64] | None = None
+        if filter_ids is not None:
+            resolved = self._resolve_filter(filter_ids)
+            if resolved is None:
+                return []
+            filter_rows, allowed_clusters = resolved
+
         q_pre = self._preprocess_single(q)
 
         # Rank clusters by L2-monotone score (matches the metric used
@@ -524,7 +596,9 @@ class IVFPQSnapIndex(FreezableIndex):
         # centroid_c + decoded_residual and we score ⟨q, decoded⟩.
         probe_ranking = probe_scores_l2_monotone(self._coarse, q_pre)
         coarse_dot = self._coarse @ q_pre          # (nlist,)
-        probe = np.argpartition(-probe_ranking, nprobe - 1)[:nprobe]
+        probe = self._probe_topn(probe_ranking, nprobe, allowed_clusters)
+        if len(probe) == 0:
+            return []
 
         # Per-subspace residual LUT.
         lut = np.empty((self.M, self.K), dtype=np.float32)
@@ -533,9 +607,9 @@ class IVFPQSnapIndex(FreezableIndex):
             lut[j] = self._codebooks[j] @ qj
 
         if rerank_candidates is None:
-            return self._score_one(probe, coarse_dot, lut, k)
+            return self._score_one(probe, coarse_dot, lut, k, filter_rows)
         return self._score_one_with_rerank(
-            probe, coarse_dot, lut, q_pre, k, rerank_candidates,
+            probe, coarse_dot, lut, q_pre, k, rerank_candidates, filter_rows,
         )
 
     def _score_one_with_rerank(
@@ -546,6 +620,7 @@ class IVFPQSnapIndex(FreezableIndex):
         q_pre: NDArray[np.float32],
         k: int,
         rerank_candidates: int,
+        filter_rows: NDArray[np.int64] | None = None,
     ) -> list[tuple[Any, float]]:
         """IVF-PQ → top-N candidates → float32 rerank → top-k.
 
@@ -558,11 +633,22 @@ class IVFPQSnapIndex(FreezableIndex):
         the winners and re-score them exactly.
         """
         pq_scores, row_idx = self._gather_pq_scores(probe, coarse_dot, lut)
+        if filter_rows is not None and len(row_idx) > 0:
+            # Both arrays are unique (row_idx is a concat of contiguous
+            # per-cluster arange() blocks, filter_rows was made unique
+            # in _resolve_filter), so assume_unique=True enables the
+            # faster sort-merge path in np.isin.
+            keep = np.isin(row_idx, filter_rows, assume_unique=True)
+            pq_scores = pq_scores[keep]
+            row_idx = row_idx[keep]
         total = len(pq_scores)
         if total == 0:
             return []
 
-        # Pick the top ``candidate_pool`` by PQ score.
+        # Pick the top ``candidate_pool`` by PQ score.  When a filter
+        # is active, the pool is already drawn from the filtered
+        # subset so the rerank stays pool-aware (no wasted slots on
+        # out-of-filter ids).
         pool = min(max(rerank_candidates, k), total)
         top = np.argpartition(-pq_scores, pool - 1)[:pool]
         cand_rows = row_idx[top]
@@ -640,12 +726,17 @@ class IVFPQSnapIndex(FreezableIndex):
         coarse_dot: NDArray[np.float32],
         lut: NDArray[np.float32],
         k: int,
+        filter_rows: NDArray[np.int64] | None = None,
     ) -> list[tuple[Any, float]]:
         """Gather → ADC sum → top-k for a single query.
 
         Hot path; used by both ``search()`` and ``search_batch()``.
         """
         scores, row_idx = self._gather_pq_scores(probe, coarse_dot, lut)
+        if filter_rows is not None and len(row_idx) > 0:
+            keep = np.isin(row_idx, filter_rows, assume_unique=True)
+            scores = scores[keep]
+            row_idx = row_idx[keep]
         total = len(scores)
         if total == 0:
             return []
@@ -668,6 +759,7 @@ class IVFPQSnapIndex(FreezableIndex):
         k: int = 10,
         nprobe: int | None = None,
         num_threads: int = 1,
+        filter_ids: set[Any] | None = None,
     ) -> list[list[tuple[Any, float]]]:
         """Approximate top-k for a batch of queries.
 
@@ -694,6 +786,11 @@ class IVFPQSnapIndex(FreezableIndex):
             (still benefits from the batched coarse + LUT).  ``> 1``
             engages a lazily-created ``ThreadPoolExecutor``.  Validate
             against your laptop core count before going above 4.
+        filter_ids : set | None, default None
+            Optional id whitelist shared by every query in the batch
+            (typical use: tenant / partition scoping).  Same cluster-
+            and pool-aware semantics as ``search()``.  The filter is
+            resolved once per batch, not per query.
 
         Returns
         -------
@@ -723,6 +820,14 @@ class IVFPQSnapIndex(FreezableIndex):
         if len(self._ids_by_row) == 0:
             return [[] for _ in range(B)]
 
+        filter_rows: NDArray[np.int64] | None = None
+        allowed_clusters: NDArray[np.int64] | None = None
+        if filter_ids is not None:
+            resolved = self._resolve_filter(filter_ids)
+            if resolved is None:
+                return [[] for _ in range(B)]
+            filter_rows, allowed_clusters = resolved
+
         # Per-query unit normalisation (skip preprocess_single's
         # one-by-one path).  Zero-norm queries get marked invalid.
         q_norms = np.linalg.norm(Q, axis=1)
@@ -742,9 +847,20 @@ class IVFPQSnapIndex(FreezableIndex):
         coarse_dot_all = q_pre_all @ self._coarse.T            # (B, nlist)
         cnorms = (self._coarse * self._coarse).sum(1)          # (nlist,)
         probe_ranking_all = 2.0 * coarse_dot_all - cnorms[None, :]
-        probes = np.argpartition(
-            -probe_ranking_all, nprobe - 1, axis=1
-        )[:, :nprobe]                                          # (B, nprobe)
+        if allowed_clusters is None:
+            probes = np.argpartition(
+                -probe_ranking_all, nprobe - 1, axis=1
+            )[:, :nprobe]                                      # (B, nprobe)
+        elif len(allowed_clusters) <= nprobe:
+            # Every query probes the same small set of allowed clusters
+            # exactly once — no argpartition needed, just broadcast.
+            probes = np.tile(allowed_clusters, (B, 1))         # (B, |allowed|)
+        else:
+            # Pick top-nprobe per query via one vectorised argpartition
+            # over the allowed-column slice of the coarse score matrix.
+            restricted = probe_ranking_all[:, allowed_clusters]   # (B, |allowed|)
+            idx = np.argpartition(-restricted, nprobe - 1, axis=1)[:, :nprobe]
+            probes = allowed_clusters[idx]                     # (B, nprobe)
 
         # One einsum, the whole batch's residual LUTs.
         # codebooks: (M, K, d_sub).  q split: (B, M, d_sub).
@@ -759,7 +875,7 @@ class IVFPQSnapIndex(FreezableIndex):
             if not bool(valid[b]):
                 return
             results[b] = self._score_one(
-                probes[b], coarse_dot_all[b], lut_batch[b], k,
+                probes[b], coarse_dot_all[b], lut_batch[b], k, filter_rows,
             )
 
         if num_threads > 1 and B >= num_threads:
