@@ -32,6 +32,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from ._codebooks import get_codebook
+from ._file_format import save_with_checksum_atomic, verify_checksum
 from ._rotation import padded_dim, rht
 
 
@@ -281,13 +282,12 @@ class ResidualSnapIndex:
         }
 
     def save(self, path: str | Path) -> None:
-        path = Path(path)
-        tmp = path.with_suffix(path.suffix + ".tmp")
         flags = 0
         if self.normalized:
             flags |= 1
         n = len(self._ids)
-        with open(tmp, "wb") as f:
+
+        def _write(f):
             f.write(_MAGIC)
             f.write(struct.pack("<IIIIIIII", _VERSION, self.dim, self.b1,
                                 self.b2, self.seed, n, flags, self._pdim))
@@ -306,11 +306,13 @@ class ResidualSnapIndex:
                         )
                     f.write(struct.pack("<H", len(s)))
                     f.write(s)
-        os.replace(tmp, path)
+
+        save_with_checksum_atomic(path, _write)
 
     @classmethod
     def load(cls, path: str | Path) -> "ResidualSnapIndex":
         path = Path(path)
+        verify_checksum(path)  # no-op for legacy files without a trailer
         with open(path, "rb") as f:
             magic = f.read(4)
             if magic != _MAGIC:
