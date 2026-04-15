@@ -6,6 +6,40 @@ the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.1] — 2026-04-15
+
+Test-correctness patch.  No behaviour change to the shipped fp16
+rerank cache — the v0.7.0 recall measurements (0.943 / 0.977 / 0.993)
+stand.  But the *unit test* that was supposed to protect against
+future regressions of that cast was vacuous, caught in the PR #31
+post-merge review (thanks, Copilot).
+
+### Fixed
+
+- **`test_fp16_cache_recall_matches_fp32_within_noise` was a tautology.**
+  The original A/B swapped the fp16 cache for its own upcast
+  (`cache.astype(float32)`) and compared.  Because upcasting
+  float16 → float32 is lossless and the rerank matmul runs in fp32
+  regardless (driven by `q_pre`'s fp32 dtype via NumPy type
+  promotion), the two runs produced bit-identical scores and the
+  assertion was always trivially true.  A future regression that
+  made the cast lossier would not have been caught.
+
+  The test now reconstructs the *pre-truncation* fp32 cache by
+  re-running `_preprocess` on the original float32 corpus and
+  compares rerank recall against *that*.  The fix includes an
+  explicit `scores_differ` assertion that at least one score in the
+  top-10 must differ between the fp16 and fp32 runs — a guard that
+  will fail loudly if the test regresses back to the vacuous form.
+
+- Clarified the `_full_precision` field docstring on how NumPy's
+  type-promotion rules keep the rerank matmul in float32.  The
+  previous wording said NumPy "promotes fp16 to fp32 internally on
+  matmul" — technically true in this case, but the *reason* it lands
+  in float32 is that `q_pre` is float32, not anything intrinsic to
+  the fp16 dtype.  Rewritten to flag the risk if `q_pre` were ever
+  downgraded to fp16.
+
 ## [0.7.0] — 2026-04-15
 
 Headline: **tier-1 production reliability + halved rerank cache**.

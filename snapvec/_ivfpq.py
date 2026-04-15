@@ -158,10 +158,13 @@ class IVFPQSnapIndex:
         # contiguously and kept in sync with _codes by add_batch / delete.
         # Layout (n, dim_eff) where dim_eff is pdim if use_rht else dim.
         # Stored as float16 to halve both disk and RAM footprint of
-        # the rerank cache at a negligible recall cost (~0.01 abs on
-        # FIQA; see bench_fp16_cache.py).  NumPy promotes fp16 to
-        # fp32 internally on matmul so the rerank hot path is
-        # unchanged in terms of arithmetic precision.
+        # the rerank cache at a negligible recall cost (~0.001 on
+        # FIQA at rerank_candidates=100).  The rerank matmul
+        # ``cand_full @ q_pre`` runs in float32 because ``q_pre`` is
+        # float32 and NumPy's type-promotion rules for mixed-dtype
+        # matmul yield the wider of the two.  If ``q_pre`` were ever
+        # downgraded to fp16 the matmul would follow suit and
+        # arithmetic precision would drop — keep it float32.
         self._full_precision: NDArray[np.float16] = np.zeros(
             (0, pdim), dtype=np.float16,
         )
