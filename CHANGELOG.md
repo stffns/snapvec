@@ -6,29 +6,80 @@ the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### Added (v0.8 WIP)
+## [0.8.0] — 2026-04-15
 
-- **`FreezableIndex` mixin** — every index class gains `idx.freeze()`
-  / `idx.unfreeze()` / `idx.frozen`.  After freezing, every mutator
-  (`add`, `add_batch`, `delete`, `fit`, `close`) raises
-  `RuntimeError` with a message that names the operation, so
-  concurrent `search()` from multiple threads is race-free by
-  contract — no hot-path lock needed.
-- **`IVFPQSnapIndex.search_batch` is now thread-safe under
-  concurrent callers.**  A `threading.Lock` serialises the lazy
-  `ThreadPoolExecutor` init so two concurrent
-  `search_batch(num_threads > 1)` callers cannot both race through
-  `if _executor is None` and leak a pool.
+Headline: **multi-reader safety + id-scoped IVF search**.  Two
+features the v0.7 users asked for once snapvec landed in multi-
+tenant services: a formal thread-safety contract so a single index
+can fan out across request threads without duplicating memory, and
+id-whitelist filtering on `IVFPQSnapIndex` so tenant / partition
+scoping doesn't have to be bolted on with post-filter passes.
+
+### Added
+
+- **`FreezableIndex` mixin** — every index class now exposes
+  `idx.freeze()` / `idx.unfreeze()` / `idx.frozen`.  After
+  freezing, every mutator (`add`, `add_batch`, `delete`, `fit`,
+  `close`) raises `RuntimeError` naming the operation, so
+  concurrent `search()` from multiple threads is race-free **by
+  contract** — no lock is taken on the query hot path.
+
+  `SnapIndex.freeze()` also pre-warms the lazy `_cache` (the
+  float16 centroid matrix materialised on first full-scan search),
+  so two concurrent first-queries on a just-frozen index no longer
+  race on that assignment.
+
+- **`IVFPQSnapIndex.search_batch` is safe under concurrent
+  callers.**  A `threading.Lock` serialises the lazy
+  `ThreadPoolExecutor` init so two callers can't both observe
+  `_executor is None` and each create their own pool.  The init
+  path uses double-checked locking so the steady-state query path
+  never touches the lock.  Once created, the executor is not torn
+  down during `search_batch()`; if a caller asks for a different
+  `num_threads` after init, `search_batch` raises `ValueError`
+  rather than shutting down a pool another thread may be about to
+  submit work to.  Lifecycle teardown remains in `close()`.
+
 - **`IVFPQSnapIndex.search(..., filter_ids=...)` /
   `search_batch(..., filter_ids=...)`** — id-whitelist filtering
-  for IVF-PQ, cluster- and pool-aware.  The probe ranking is
-  restricted to clusters that contain at least one filter row
-  (sparse filters skip clusters entirely) and the row-level mask
-  is applied before the top-k / rerank-pool selection, so the
-  rerank candidate pool is drawn from the filtered subset — no
-  wasted pool slots on out-of-filter ids.  Unknown ids in the
-  filter are silently dropped; an entirely-unknown filter returns
-  `[]` immediately.
+  for IVF-PQ, cluster- and pool-aware:
+
+  - *Cluster skip*: the probe ranking is restricted to clusters
+    that contain at least one filter row, so sparse filters don't
+    waste `nprobe` slots on empty clusters.  When
+    `len(allowed_clusters) <= nprobe` the probe set is computed
+    with a direct `np.tile` of the allowed clusters (no
+    argpartition).
+  - *Pool-aware*: the row filter is applied before the top-k /
+    rerank-pool selection, so the rerank candidate pool is drawn
+    from the filtered subset — no slots spent on ids the caller
+    just excluded.
+  - *Sparse-friendly mask*: internally represented as a sorted
+    `int64` array + `np.isin(row_idx, filter_rows,
+    assume_unique=True)`, not a dense `N`-bool array.  At
+    `N = 100 M` this is the difference between a 100 MB
+    allocation per query and a scan proportional to the probed
+    subset.
+  - Unknown ids in the filter are silently dropped; an entirely-
+    unknown filter returns `[]` immediately.
+
+### Changed
+
+- Every index class's `add()` now calls
+  `self._check_not_frozen("add")` before delegating to
+  `add_batch()`, so the `RuntimeError` thrown on a frozen index
+  names `add` (the method the caller invoked) rather than
+  `add_batch` (the internal delegate).
+
+### Documentation
+
+- `IVFPQSnapIndex.search()` docstring clarifies that the rerank
+  cache has been `float16` since v0.7 while the rerank matmul
+  itself stays in `float32` via NumPy type-promotion on `q_pre`.
+- `_freezable.py` module docstring spells out that any lazy per-
+  class cache reachable from `search()` must be pre-warmed in the
+  subclass's `freeze()` override (or serialised by the class
+  itself) — not assumed safe by default.
 
 ## [0.7.1] — 2026-04-15
 
