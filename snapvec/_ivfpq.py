@@ -155,11 +155,11 @@ class IVFPQSnapIndex(FreezableIndex):
         self._codes: NDArray[np.uint8] = np.zeros((M, 0), dtype=np.uint8)
         self._offsets: NDArray[np.int64] = np.zeros(nlist + 1, dtype=np.int64)
         self._norms: NDArray[np.float32] = np.zeros(0, dtype=np.float32)
-        # Optional float32 cache of the original (post-preprocess) vectors
+        # Optional float16 cache of the original (post-preprocess) vectors
         # for the `rerank_candidates` search path.  Stored cluster-
         # contiguously and kept in sync with _codes by add_batch / delete.
         # Layout (n, dim_eff) where dim_eff is pdim if use_rht else dim.
-        # Stored as float16 to halve both disk and RAM footprint of
+        # float16 halves both disk and RAM footprint of
         # the rerank cache at a negligible recall cost (~0.001 on
         # FIQA at rerank_candidates=100).  The rerank matmul
         # ``cand_full @ q_pre`` runs in float32 because ``q_pre`` is
