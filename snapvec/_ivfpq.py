@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import os
 import struct
+import warnings
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -42,8 +43,16 @@ from ._kmeans import assign_l2, kmeans_mse, probe_scores_l2_monotone
 from ._rotation import padded_dim, rht
 
 _MAGIC = b"SNPI"
-_VERSION = 1
+_VERSION = 2  # v2: codes stored column-major as (M, n) for cache-friendly gather
+_LEGACY_VERSIONS = {1}
 _MAX_ID_BYTES = 0xFFFF
+
+# Standard FAISS rule of thumb for stable coarse k-means: at least
+# 30 training vectors per cluster.  Below this, many clusters end up
+# empty or with too few samples to learn a meaningful centroid, and
+# recall@nprobe stops responding to nprobe (we measured this on the
+# v0.5 N=1M baseline: 50k train / 4096 nlist → recall pinned at 0.731).
+_FAISS_MIN_RATIO = 30
 
 # Flags bitfield
 _FLAG_NORMALIZED = 1 << 0
@@ -134,7 +143,10 @@ class IVFPQSnapIndex:
             (M, K, self._d_sub), dtype=np.float32
         )
         # cluster-contiguous storage
-        self._codes: NDArray[np.uint8] = np.zeros((0, M), dtype=np.uint8)
+        # codes laid out column-major (M, n) — each subspace's codes
+        # are contiguous so gather inside search is one cache-line walk
+        # instead of a stride-M = 192 hop per lookup.
+        self._codes: NDArray[np.uint8] = np.zeros((M, 0), dtype=np.uint8)
         self._offsets: NDArray[np.int64] = np.zeros(nlist + 1, dtype=np.int64)
         self._norms: NDArray[np.float32] = np.zeros(0, dtype=np.float32)
 
@@ -143,8 +155,25 @@ class IVFPQSnapIndex:
         self._id_to_row: dict[Any, int] = {}
 
         # Lazy thread pool, created on first ``search_batch`` call with
-        # ``num_threads > 1``.  Reused across queries.
+        # ``num_threads > 1``.  Reused across queries.  ``_executor_workers``
+        # tracks the configured worker count without reaching into
+        # ThreadPoolExecutor's private ``_max_workers`` attribute.
         self._executor: ThreadPoolExecutor | None = None
+        self._executor_workers: int = 0
+
+    def close(self) -> None:
+        """Release the lazy thread pool, if one was created.
+
+        Safe to call multiple times.  Useful when an index is being
+        torn down explicitly (e.g., long-lived workers cycling
+        indices) — Python's GC will also reclaim the executor when
+        the index goes out of scope, but explicit cleanup avoids
+        worker threads lingering past their last useful query.
+        """
+        if self._executor is not None:
+            self._executor.shutdown(wait=False)
+            self._executor = None
+            self._executor_workers = 0
 
     # ──────────────────────────────────────────────────────────────── #
     # preprocessing                                                     #
@@ -208,6 +237,18 @@ class IVFPQSnapIndex:
             raise ValueError(
                 f"need at least max(K, nlist) = "
                 f"{max(self.K, self.nlist)} training vectors; got {len(arr)}"
+            )
+        recommended = self.nlist * _FAISS_MIN_RATIO
+        if len(arr) < recommended:
+            warnings.warn(
+                f"only {len(arr)} training vectors for nlist={self.nlist} "
+                f"(ratio {len(arr) / self.nlist:.1f}); FAISS rule of thumb "
+                f"is ≥ {_FAISS_MIN_RATIO} samples per cluster (~{recommended} "
+                f"total).  Below this many coarse clusters end up empty or "
+                f"under-trained and recall stops responding to nprobe.  "
+                f"Either pass more training data or lower nlist.",
+                UserWarning,
+                stacklevel=2,
             )
         pre, _ = self._preprocess(arr)
         # 1. Coarse k-means.
@@ -282,12 +323,14 @@ class IVFPQSnapIndex:
                 f"id already indexed: {next(iter(clash))!r}"
             )
 
-        # Encode in chunks → bounded peak memory.
-        new_codes = np.empty((n, self.M), dtype=np.uint8)
+        # Encode in chunks → bounded peak memory.  Codes built
+        # column-major (M, n) so the per-subspace gather inside
+        # search() is contiguous instead of strided by M.
+        new_codes = np.empty((self.M, n), dtype=np.uint8)
         new_asn = np.empty(n, dtype=np.int64)
         new_norms = np.empty(n if not self.normalized else 0, dtype=np.float32)
-        cb_norms = (self._codebooks ** 2).sum(2)  # (M, K) precomputed
-        cb_T = np.transpose(self._codebooks, (0, 2, 1))  # (M, d_sub, K)
+        cb_norms = (self._codebooks ** 2).sum(2)             # (M, K)
+        cb_T = np.transpose(self._codebooks, (0, 2, 1))      # (M, d_sub, K)
         for start in range(0, n, self._ENCODE_CHUNK):
             end = min(start + self._ENCODE_CHUNK, n)
             sub = arr[start:end]
@@ -303,18 +346,18 @@ class IVFPQSnapIndex:
                     - 2 * Rj @ cb_T[j]
                     + cb_norms[j][None, :]
                 )
-                new_codes[start:end, j] = d2.argmin(1).astype(np.uint8)
+                new_codes[j, start:end] = d2.argmin(1).astype(np.uint8)
             if not self.normalized:
                 new_norms[start:end] = norms
 
         # Combine with existing state, sort once by cluster id.
-        if len(self._codes) == 0:
+        if self._codes.shape[1] == 0:
             combined_codes = new_codes
             combined_asn = new_asn
             combined_ids_seq: list[Any] = list(ids)
             combined_norms = new_norms
         else:
-            combined_codes = np.vstack([self._codes, new_codes])
+            combined_codes = np.concatenate([self._codes, new_codes], axis=1)
             combined_asn = np.concatenate(
                 [self._cluster_ids_from_offsets(), new_asn]
             )
@@ -325,7 +368,7 @@ class IVFPQSnapIndex:
             )
 
         order = np.argsort(combined_asn, kind="stable")
-        self._codes = combined_codes[order]
+        self._codes = combined_codes[:, order]
         # Reorder ids via numpy object array → bulk gather in C, no
         # Python list comprehension over N elements.
         ids_arr = np.array(combined_ids_seq, dtype=object)
@@ -338,7 +381,7 @@ class IVFPQSnapIndex:
 
     def _cluster_ids_from_offsets(self) -> NDArray[np.int64]:
         """Reconstruct the per-row cluster id from ``_offsets``."""
-        asn = np.empty(len(self._codes), dtype=np.int64)
+        asn = np.empty(self._codes.shape[1], dtype=np.int64)
         for c in range(self.nlist):
             s, e = int(self._offsets[c]), int(self._offsets[c + 1])
             if e > s:
@@ -351,9 +394,9 @@ class IVFPQSnapIndex:
             return False
         row = self._id_to_row[id]
         asn = self._cluster_ids_from_offsets()
-        mask = np.ones(len(self._codes), dtype=bool)
+        mask = np.ones(self._codes.shape[1], dtype=bool)
         mask[row] = False
-        self._codes = self._codes[mask]
+        self._codes = self._codes[:, mask]
         asn = asn[mask]
         self._ids_by_row = [self._ids_by_row[i] for i in range(len(mask)) if mask[i]]
         if not self.normalized:
@@ -431,7 +474,11 @@ class IVFPQSnapIndex:
         if total == 0:
             return []
 
-        cat = np.empty((total, self.M), dtype=np.uint8)
+        # Contiguous gather: each probed cluster is a contiguous slice
+        # of _codes along axis=1 (column-major (M, n) layout).  Build
+        # (M, total) cat by concatenating the M-major slices once, then
+        # the per-subspace gather stays contiguous in memory.
+        cat = np.empty((self.M, total), dtype=np.uint8)
         row_idx = np.empty(total, dtype=np.int64)
         scores = np.empty(total, dtype=np.float32)
         cursor = 0
@@ -439,13 +486,13 @@ class IVFPQSnapIndex:
             n_c = e - s
             if n_c == 0:
                 continue
-            cat[cursor : cursor + n_c] = self._codes[s:e]
+            cat[:, cursor : cursor + n_c] = self._codes[:, s:e]
             row_idx[cursor : cursor + n_c] = np.arange(s, e, dtype=np.int64)
             scores[cursor : cursor + n_c] = coarse_dot[c]
             cursor += n_c
 
         for j in range(self.M):
-            scores += lut[j][cat[:, j]]
+            scores += lut[j][cat[j]]
 
         if not self.normalized:
             scores *= self._norms[row_idx]
@@ -563,10 +610,11 @@ class IVFPQSnapIndex:
             )
 
         if num_threads > 1 and B >= num_threads:
-            if self._executor is None or self._executor._max_workers != num_threads:
+            if self._executor is None or self._executor_workers != num_threads:
                 if self._executor is not None:
                     self._executor.shutdown(wait=False)
                 self._executor = ThreadPoolExecutor(max_workers=num_threads)
+                self._executor_workers = num_threads
             # ex.map blocks until all complete; futures populate results
             # in-place via the closure capture.
             list(self._executor.map(_process, range(B)))
@@ -639,7 +687,10 @@ class IVFPQSnapIndex:
             f.write(self._codebooks.tobytes())
             f.write(self._offsets.tobytes())
             if n > 0:
-                f.write(self._codes.tobytes())
+                # _codes is shape (M, n); ascontiguousarray ensures the
+                # M-major byte layout regardless of any prior slicing
+                # that left the array as a non-contiguous view.
+                f.write(np.ascontiguousarray(self._codes).tobytes())
                 if not self.normalized:
                     f.write(self._norms.tobytes())
                 for id_val in self._ids_by_row:
@@ -664,7 +715,7 @@ class IVFPQSnapIndex:
             (version, dim, pdim, nlist, M, K, d_sub, seed, n, flags) = struct.unpack(
                 "<IIIIIIIIII", f.read(40)
             )
-            if version != _VERSION:
+            if version != _VERSION and version not in _LEGACY_VERSIONS:
                 raise ValueError(f"unsupported .snpi version {version}")
             normalized = bool(flags & _FLAG_NORMALIZED)
             use_rht = bool(flags & _FLAG_USE_RHT)
@@ -711,10 +762,19 @@ class IVFPQSnapIndex:
                 raise ValueError("offsets must be non-decreasing")
             idx._fitted = True
             if n > 0:
-                idx._codes = (
-                    np.frombuffer(f.read(n * M), dtype=np.uint8)
-                    .reshape(n, M).copy()
-                )
+                # v1 stored codes as (n, M) row-major; v2 stores
+                # (M, n) column-major.  Transparently transpose v1 on
+                # load so search/add see the v2 layout.
+                if version == 1:
+                    idx._codes = (
+                        np.frombuffer(f.read(n * M), dtype=np.uint8)
+                        .reshape(n, M).T.copy()
+                    )
+                else:
+                    idx._codes = (
+                        np.frombuffer(f.read(M * n), dtype=np.uint8)
+                        .reshape(M, n).copy()
+                    )
                 if not normalized:
                     idx._norms = np.frombuffer(f.read(n * 4), dtype=np.float32).copy()
                 idx._ids_by_row = []
