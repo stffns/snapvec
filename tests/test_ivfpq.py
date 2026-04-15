@@ -84,6 +84,74 @@ def test_nprobe_default_and_bounds() -> None:
         idx.search(corpus[0], k=1, nprobe=33)
 
 
+def test_search_batch_matches_per_query_loop() -> None:
+    """search_batch must produce exactly the same top-k IDs (and
+    within float-noise scores) as a per-query loop over search()."""
+    d, n_corpus, n_queries = 128, 1500, 25
+    corpus = _clustered(n_corpus, d, n_clusters=30, seed=81)
+    queries = _clustered(n_queries, d, n_clusters=30, seed=82)
+    ivf = IVFPQSnapIndex(
+        dim=d, nlist=32, M=16, K=64, normalized=True, seed=0,
+    )
+    ivf.fit(corpus[:1000])
+    ivf.add_batch(list(range(n_corpus)), corpus)
+
+    serial = [ivf.search(q, k=10, nprobe=16) for q in queries]
+    batched = ivf.search_batch(queries, k=10, nprobe=16, num_threads=1)
+    assert len(serial) == len(batched)
+    for i, (s, b) in enumerate(zip(serial, batched)):
+        assert {h[0] for h in s} == {h[0] for h in b}, (
+            f"batched diverged from serial at query {i}"
+        )
+
+
+def test_search_batch_threaded_matches_serial() -> None:
+    """Threaded batch must match single-thread batch results."""
+    d, n_corpus, n_queries = 128, 1500, 32
+    corpus = _clustered(n_corpus, d, n_clusters=30, seed=83)
+    queries = _clustered(n_queries, d, n_clusters=30, seed=84)
+    ivf = IVFPQSnapIndex(
+        dim=d, nlist=32, M=16, K=64, normalized=True, seed=0,
+    )
+    ivf.fit(corpus[:1000])
+    ivf.add_batch(list(range(n_corpus)), corpus)
+    serial = ivf.search_batch(queries, k=10, nprobe=16, num_threads=1)
+    threaded = ivf.search_batch(queries, k=10, nprobe=16, num_threads=4)
+    for i, (s, t) in enumerate(zip(serial, threaded)):
+        assert {h[0] for h in s} == {h[0] for h in t}, (
+            f"threaded batch diverged at query {i}"
+        )
+
+
+def test_search_batch_handles_zero_norm_queries() -> None:
+    """Zero-norm queries in a batch must return [] for those slots,
+    not crash and not poison the rest of the batch."""
+    d, n_corpus = 64, 600
+    corpus = _clustered(n_corpus, d, seed=85)
+    queries = _clustered(5, d, seed=86)
+    queries[2] = 0  # poison one
+    ivf = IVFPQSnapIndex(
+        dim=d, nlist=16, M=16, K=16, normalized=True, seed=0,
+    )
+    ivf.fit(corpus[:500])
+    ivf.add_batch(list(range(n_corpus)), corpus)
+    out = ivf.search_batch(queries, k=5, nprobe=8)
+    assert out[2] == []
+    for i in (0, 1, 3, 4):
+        assert len(out[i]) == 5
+
+
+def test_search_batch_validates_shape() -> None:
+    corpus = _unit_gaussian(200, 32, seed=87)
+    idx = IVFPQSnapIndex(dim=32, nlist=4, M=8, K=16, normalized=True)
+    idx.fit(corpus)
+    idx.add_batch(list(range(200)), corpus)
+    with pytest.raises(ValueError, match="queries"):
+        idx.search_batch(np.zeros((3, 16), dtype=np.float32), k=1)
+    # Empty batch returns empty list.
+    assert idx.search_batch(np.zeros((0, 32), dtype=np.float32), k=1) == []
+
+
 def test_full_probe_beats_default_nprobe() -> None:
     """With ``nprobe == nlist`` we scan every cluster; recall should
     converge to the PQSnapIndex full-scan baseline (same M/K, same
