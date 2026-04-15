@@ -10,7 +10,7 @@ benchmarks they cite — copies live wherever they get published
 | # | Title | Status | Tied to release |
 |---:|---|---|---|
 | 01 | [I tried 6 NumPy-level optimizations on a vector index. 4 lost. Here's the math.](./01-numpy-perf-ceiling.md) | draft, ready to publish | v0.5.0 |
-| 02 | [Then we added Numba. Here's what changed.](./02-numba-followup.md) | outline, fill after Numba lands | v0.7.0 |
+| 02 | [Then we shipped a `[fast]` extension. Here's what changed — and which compiler we picked, and why.](./02-fast-extension.md) | outline; finalised once the extension lands.  Numba vs Rust+PyO3 decision is captured at the bottom (Numba first to validate; Rust later for serious distribution). | v0.7.0 |
 
 ## Style notes
 
