@@ -7,5 +7,13 @@ dist/
 .DS_Store
 *.snpv
 *.snpv.tmp
+*.snpq
+*.snpr
+*.snpi
+*.snp[a-z].tmp
 .pytest_cache/
 .ruff_cache/
+
+# experiment caches and harness state — large binary, not source of truth
+experiments/.cache_*.npy
+.claude/scheduled_tasks.lock
