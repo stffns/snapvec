@@ -41,7 +41,8 @@ from ._kmeans import assign_l2, kmeans_mse, probe_scores_l2_monotone
 from ._rotation import padded_dim, rht
 
 _MAGIC = b"SNPI"
-_VERSION = 1
+_VERSION = 2  # v2: codes stored column-major as (M, n) for cache-friendly gather
+_LEGACY_VERSIONS = {1}
 _MAX_ID_BYTES = 0xFFFF
 
 # Flags bitfield
@@ -133,7 +134,10 @@ class IVFPQSnapIndex:
             (M, K, self._d_sub), dtype=np.float32
         )
         # cluster-contiguous storage
-        self._codes: NDArray[np.uint8] = np.zeros((0, M), dtype=np.uint8)
+        # codes laid out column-major (M, n) — each subspace's codes
+        # are contiguous so gather inside search is one cache-line walk
+        # instead of a stride-M = 192 hop per lookup.
+        self._codes: NDArray[np.uint8] = np.zeros((M, 0), dtype=np.uint8)
         self._offsets: NDArray[np.int64] = np.zeros(nlist + 1, dtype=np.int64)
         self._norms: NDArray[np.float32] = np.zeros(0, dtype=np.float32)
 
@@ -277,12 +281,14 @@ class IVFPQSnapIndex:
                 f"id already indexed: {next(iter(clash))!r}"
             )
 
-        # Encode in chunks → bounded peak memory.
-        new_codes = np.empty((n, self.M), dtype=np.uint8)
+        # Encode in chunks → bounded peak memory.  Codes built
+        # column-major (M, n) so the per-subspace gather inside
+        # search() is contiguous instead of strided by M.
+        new_codes = np.empty((self.M, n), dtype=np.uint8)
         new_asn = np.empty(n, dtype=np.int64)
         new_norms = np.empty(n if not self.normalized else 0, dtype=np.float32)
-        cb_norms = (self._codebooks ** 2).sum(2)  # (M, K) precomputed
-        cb_T = np.transpose(self._codebooks, (0, 2, 1))  # (M, d_sub, K)
+        cb_norms = (self._codebooks ** 2).sum(2)             # (M, K)
+        cb_T = np.transpose(self._codebooks, (0, 2, 1))      # (M, d_sub, K)
         for start in range(0, n, self._ENCODE_CHUNK):
             end = min(start + self._ENCODE_CHUNK, n)
             sub = arr[start:end]
@@ -298,18 +304,18 @@ class IVFPQSnapIndex:
                     - 2 * Rj @ cb_T[j]
                     + cb_norms[j][None, :]
                 )
-                new_codes[start:end, j] = d2.argmin(1).astype(np.uint8)
+                new_codes[j, start:end] = d2.argmin(1).astype(np.uint8)
             if not self.normalized:
                 new_norms[start:end] = norms
 
         # Combine with existing state, sort once by cluster id.
-        if len(self._codes) == 0:
+        if self._codes.shape[1] == 0:
             combined_codes = new_codes
             combined_asn = new_asn
             combined_ids_seq: list[Any] = list(ids)
             combined_norms = new_norms
         else:
-            combined_codes = np.vstack([self._codes, new_codes])
+            combined_codes = np.concatenate([self._codes, new_codes], axis=1)
             combined_asn = np.concatenate(
                 [self._cluster_ids_from_offsets(), new_asn]
             )
@@ -320,7 +326,7 @@ class IVFPQSnapIndex:
             )
 
         order = np.argsort(combined_asn, kind="stable")
-        self._codes = combined_codes[order]
+        self._codes = combined_codes[:, order]
         # Reorder ids via numpy object array → bulk gather in C, no
         # Python list comprehension over N elements.
         ids_arr = np.array(combined_ids_seq, dtype=object)
@@ -333,7 +339,7 @@ class IVFPQSnapIndex:
 
     def _cluster_ids_from_offsets(self) -> NDArray[np.int64]:
         """Reconstruct the per-row cluster id from ``_offsets``."""
-        asn = np.empty(len(self._codes), dtype=np.int64)
+        asn = np.empty(self._codes.shape[1], dtype=np.int64)
         for c in range(self.nlist):
             s, e = int(self._offsets[c]), int(self._offsets[c + 1])
             if e > s:
@@ -346,9 +352,9 @@ class IVFPQSnapIndex:
             return False
         row = self._id_to_row[id]
         asn = self._cluster_ids_from_offsets()
-        mask = np.ones(len(self._codes), dtype=bool)
+        mask = np.ones(self._codes.shape[1], dtype=bool)
         mask[row] = False
-        self._codes = self._codes[mask]
+        self._codes = self._codes[:, mask]
         asn = asn[mask]
         self._ids_by_row = [self._ids_by_row[i] for i in range(len(mask)) if mask[i]]
         if not self.normalized:
@@ -413,8 +419,11 @@ class IVFPQSnapIndex:
         if total == 0:
             return []
 
-        # Contiguous gather: one concatenation, one sum.
-        cat = np.empty((total, self.M), dtype=np.uint8)
+        # Contiguous gather: each probed cluster is a contiguous slice
+        # of _codes along axis=1.  Build (M, total) cat by concatenating
+        # the M-major slices once, then gather per-subspace stays
+        # contiguous in memory.
+        cat = np.empty((self.M, total), dtype=np.uint8)
         row_idx = np.empty(total, dtype=np.int64)
         scores = np.empty(total, dtype=np.float32)
         cursor = 0
@@ -422,13 +431,13 @@ class IVFPQSnapIndex:
             n_c = e - s
             if n_c == 0:
                 continue
-            cat[cursor : cursor + n_c] = self._codes[s:e]
+            cat[:, cursor : cursor + n_c] = self._codes[:, s:e]
             row_idx[cursor : cursor + n_c] = np.arange(s, e, dtype=np.int64)
             scores[cursor : cursor + n_c] = coarse_dot[c]
             cursor += n_c
 
         for j in range(self.M):
-            scores += lut[j][cat[:, j]]
+            scores += lut[j][cat[j]]
 
         if not self.normalized:
             scores *= self._norms[row_idx]
@@ -504,7 +513,10 @@ class IVFPQSnapIndex:
             f.write(self._codebooks.tobytes())
             f.write(self._offsets.tobytes())
             if n > 0:
-                f.write(self._codes.tobytes())
+                # _codes is shape (M, n); ascontiguousarray ensures the
+                # M-major byte layout regardless of any prior slicing
+                # that left the array as a non-contiguous view.
+                f.write(np.ascontiguousarray(self._codes).tobytes())
                 if not self.normalized:
                     f.write(self._norms.tobytes())
                 for id_val in self._ids_by_row:
@@ -529,7 +541,7 @@ class IVFPQSnapIndex:
             (version, dim, pdim, nlist, M, K, d_sub, seed, n, flags) = struct.unpack(
                 "<IIIIIIIIII", f.read(40)
             )
-            if version != _VERSION:
+            if version != _VERSION and version not in _LEGACY_VERSIONS:
                 raise ValueError(f"unsupported .snpi version {version}")
             normalized = bool(flags & _FLAG_NORMALIZED)
             use_rht = bool(flags & _FLAG_USE_RHT)
@@ -576,10 +588,19 @@ class IVFPQSnapIndex:
                 raise ValueError("offsets must be non-decreasing")
             idx._fitted = True
             if n > 0:
-                idx._codes = (
-                    np.frombuffer(f.read(n * M), dtype=np.uint8)
-                    .reshape(n, M).copy()
-                )
+                # v1 stored codes as (n, M) row-major; v2 stores
+                # (M, n) column-major.  Transparently transpose v1 on
+                # load so search/add see the v2 layout.
+                if version == 1:
+                    idx._codes = (
+                        np.frombuffer(f.read(n * M), dtype=np.uint8)
+                        .reshape(n, M).T.copy()
+                    )
+                else:
+                    idx._codes = (
+                        np.frombuffer(f.read(M * n), dtype=np.uint8)
+                        .reshape(M, n).copy()
+                    )
                 if not normalized:
                     idx._norms = np.frombuffer(f.read(n * 4), dtype=np.float32).copy()
                 idx._ids_by_row = []
