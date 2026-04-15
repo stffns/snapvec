@@ -52,6 +52,7 @@ from numpy.typing import NDArray
 
 from ._codebooks import get_codebook
 from ._file_format import save_with_checksum_atomic, verify_checksum
+from ._freezable import FreezableIndex
 from ._rotation import padded_dim, rht
 
 _MAGIC = b"SNPV"
@@ -60,7 +61,7 @@ _FLAG_PROD = 0x1
 _FLAG_NORMALIZED = 0x2
 
 
-class SnapIndex:
+class SnapIndex(FreezableIndex):
     """Compressed in-memory ANN index using randomized Hadamard + Lloyd-Max.
 
     Parameters
@@ -230,6 +231,7 @@ class SnapIndex:
         vectors : NDArray[np.float32], shape (n, dim)
             Raw embedding vectors (need not be normalized).
         """
+        self._check_not_frozen("add_batch")
         arr = np.asarray(vectors, dtype=np.float32)
         n = len(arr)
         if n == 0:
@@ -319,6 +321,7 @@ class SnapIndex:
 
         Returns True if the id was found and removed, False otherwise.
         """
+        self._check_not_frozen("delete")
         if id not in self._id_to_pos:
             return False
 

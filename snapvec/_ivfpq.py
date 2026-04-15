@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import os
 import struct
+import threading
 import warnings
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -40,6 +41,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from ._file_format import save_with_checksum_atomic, verify_checksum
+from ._freezable import FreezableIndex
 from ._kmeans import assign_l2, kmeans_mse, probe_scores_l2_monotone
 from ._rotation import padded_dim, rht
 
@@ -79,7 +81,7 @@ def _decode_id(raw: str) -> Any:
 # IVFPQSnapIndex                                                        #
 # ──────────────────────────────────────────────────────────────────── #
 
-class IVFPQSnapIndex:
+class IVFPQSnapIndex(FreezableIndex):
     """Inverted-file + residual Product Quantization.
 
     Parameters
@@ -179,6 +181,10 @@ class IVFPQSnapIndex:
         # ThreadPoolExecutor's private ``_max_workers`` attribute.
         self._executor: ThreadPoolExecutor | None = None
         self._executor_workers: int = 0
+        # Serialises lazy executor creation in ``search_batch`` so two
+        # threads calling search_batch(num_threads > 1) concurrently
+        # don't race on the ``if self._executor is None`` check.
+        self._executor_lock = threading.Lock()
 
     def close(self) -> None:
         """Release the lazy thread pool, if one was created.
@@ -189,6 +195,7 @@ class IVFPQSnapIndex:
         the index goes out of scope, but explicit cleanup avoids
         worker threads lingering past their last useful query.
         """
+        self._check_not_frozen("close")
         if self._executor is not None:
             self._executor.shutdown(wait=False)
             self._executor = None
@@ -246,6 +253,7 @@ class IVFPQSnapIndex:
         kmeans_iters: int = 15,
     ) -> None:
         """Train coarse centroids and residual codebooks."""
+        self._check_not_frozen("fit")
         if self._fitted:
             raise RuntimeError(
                 "fit() already called; create a fresh IVFPQSnapIndex to "
@@ -310,6 +318,7 @@ class IVFPQSnapIndex:
         comprehension, which avoids a O(N) interpreter pass at the
         end of large batches.
         """
+        self._check_not_frozen("add_batch")
         self._require_fitted()
         arr = np.asarray(vectors, dtype=np.float32)
         if arr.ndim != 2 or arr.shape[1] != self.dim:
@@ -426,6 +435,7 @@ class IVFPQSnapIndex:
 
     def delete(self, id: Any) -> bool:
         """Remove a vector by id.  O(n) — rebuilds the contiguous layout."""
+        self._check_not_frozen("delete")
         if id not in self._id_to_row:
             return False
         row = self._id_to_row[id]
@@ -748,14 +758,27 @@ class IVFPQSnapIndex:
             )
 
         if num_threads > 1 and B >= num_threads:
-            if self._executor is None or self._executor_workers != num_threads:
-                if self._executor is not None:
-                    self._executor.shutdown(wait=False)
-                self._executor = ThreadPoolExecutor(max_workers=num_threads)
-                self._executor_workers = num_threads
+            # Lazy init of the pool is guarded by a lock so two
+            # concurrent search_batch(num_threads > 1) calls cannot
+            # both observe _executor is None and each create their
+            # own (leaking the first one's threads).  After the
+            # lock block the executor reference is stable for the
+            # remainder of this call.
+            with self._executor_lock:
+                if (
+                    self._executor is None
+                    or self._executor_workers != num_threads
+                ):
+                    if self._executor is not None:
+                        self._executor.shutdown(wait=False)
+                    self._executor = ThreadPoolExecutor(
+                        max_workers=num_threads,
+                    )
+                    self._executor_workers = num_threads
+            executor = self._executor
             # ex.map blocks until all complete; futures populate results
             # in-place via the closure capture.
-            list(self._executor.map(_process, range(B)))
+            list(executor.map(_process, range(B)))
         else:
             for b in range(B):
                 _process(b)

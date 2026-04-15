@@ -34,6 +34,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from ._file_format import save_with_checksum_atomic, verify_checksum
+from ._freezable import FreezableIndex
 from ._kmeans import kmeans_mse
 from ._rotation import padded_dim, rht
 
@@ -62,7 +63,7 @@ def _decode_id(raw: str) -> Any:
             return raw
 
 
-class PQSnapIndex:
+class PQSnapIndex(FreezableIndex):
     """Product-quantization index trained once on a corpus sample.
 
     Parameters
@@ -195,6 +196,7 @@ class PQSnapIndex:
         silently overwrite the codebooks and, if any vectors had been
         indexed, invalidate their codes.
         """
+        self._check_not_frozen("fit")
         if self._fitted:
             # Covers both re-fit with or without prior add_batch — either
             # would overwrite the codebooks and (silently) invalidate any
@@ -230,6 +232,7 @@ class PQSnapIndex:
     def add_batch(
         self, ids: list[Any], vectors: NDArray[np.float32]
     ) -> None:
+        self._check_not_frozen("add_batch")
         self._require_fitted()
         arr = np.asarray(vectors, dtype=np.float32)
         if arr.ndim != 2 or arr.shape[1] != self.dim:
@@ -269,6 +272,7 @@ class PQSnapIndex:
             )
 
     def delete(self, id: Any) -> bool:
+        self._check_not_frozen("delete")
         if id not in self._id_to_pos:
             return False
         pos = self._id_to_pos.pop(id)
