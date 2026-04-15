@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import os
 import struct
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +44,13 @@ from ._rotation import padded_dim, rht
 _MAGIC = b"SNPI"
 _VERSION = 1
 _MAX_ID_BYTES = 0xFFFF
+
+# Standard FAISS rule of thumb for stable coarse k-means: at least
+# 30 training vectors per cluster.  Below this, many clusters end up
+# empty or with too few samples to learn a meaningful centroid, and
+# recall@nprobe stops responding to nprobe (we measured this on the
+# v0.5 N=1M baseline: 50k train / 4096 nlist → recall pinned at 0.731).
+_FAISS_MIN_RATIO = 30
 
 # Flags bitfield
 _FLAG_NORMALIZED = 1 << 0
@@ -203,6 +211,18 @@ class IVFPQSnapIndex:
             raise ValueError(
                 f"need at least max(K, nlist) = "
                 f"{max(self.K, self.nlist)} training vectors; got {len(arr)}"
+            )
+        recommended = self.nlist * _FAISS_MIN_RATIO
+        if len(arr) < recommended:
+            warnings.warn(
+                f"only {len(arr)} training vectors for nlist={self.nlist} "
+                f"(ratio {len(arr) / self.nlist:.0f}); FAISS rule of thumb "
+                f"is ≥ {_FAISS_MIN_RATIO} samples per cluster (~{recommended} "
+                f"total).  Below this many coarse clusters end up empty or "
+                f"under-trained and recall stops responding to nprobe.  "
+                f"Either pass more training data or lower nlist.",
+                UserWarning,
+                stacklevel=2,
             )
         pre, _ = self._preprocess(arr)
         # 1. Coarse k-means.
