@@ -6,24 +6,90 @@ the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### Planned release sequence
+## [0.6.0] — 2026-04-15
 
-The v0.5.0 entry below lists "v0.6 roadmap" as a single bucket; that
-turned into a deliberate two-release split:
+Headline: **breaks the PQ recall ceiling**.  The v0.5.0 release
+documented a hard limit of **recall@10 = 0.929** at `M = 192, K = 256`
+— no amount of nprobe could get past it, because the residual PQ
+codebook couldn't resolve the last few percent of error.  v0.6 adds
+an opt-in float32 rerank pass that recovers the recall the PQ
+approximation lost, at <1 % latency overhead.
 
-- **v0.6.0 — `pq_rerank=True`** to break the recall ceiling at
-  `M = 256, K = 256` (full-scan PQ tops out at 0.929; rerank with
-  the original float32 vectors lifts top-k recall toward 0.97+ at
-  the cost of ~1 ms additional latency and an opt-in ~4× storage
-  hit via `keep_full_precision=True`).
-- **v0.7.0 — `snapvec[fast]` accelerator** for the search hot path.
-  Numba is the prototyping path; Rust + PyO3 + maturin is the
-  long-term distribution path.  See
-  [`docs/blog/02-fast-extension.md`](docs/blog/02-fast-extension.md)
-  for the decision matrix kept up to date as the work progresses.
+### Added
 
-Bit-packed PQ codes for `K < 256` and `filter_ids` on PQ / IVF-PQ
-remain on the roadmap, scheduled per demand after 0.7.
+- **`IVFPQSnapIndex(... keep_full_precision=True)`** — stores an
+  additional `(n, dim_eff) float32` cache of the original (post-
+  preprocess) vectors alongside the PQ codes, sorted cluster-
+  contiguously in sync with `_codes`.  Opt-in; default `False` keeps
+  v0.5 storage footprint exactly.  Storage cost is
+  `dim_eff × 4 bytes / vector` (e.g. +1536 B/vec at `dim = 384`).
+
+- **`IVFPQSnapIndex.search(..., rerank_candidates=N)`** — when set
+  (and the index was built with `keep_full_precision=True`), the
+  IVF-PQ pass returns its top-`N` candidates, those get re-scored
+  exactly against the cached float32 vectors, and the top-`k` of
+  the reranked set is returned.  Requires `rerank_candidates >= k`.
+
+  Measured on FIQA / BGE-small (N = 57 638, `nlist=512`, `M=192`,
+  `K=256`, 300 queries, mean ms / query):
+
+  | nprobe | PQ recall | PQ ms | + rerank(100) recall | + rerank(100) ms |
+  |---:|---:|---:|---:|---:|
+  | 16 | 0.842 | 0.87 | **0.880** | 0.89 |
+  | 32 | 0.893 | 1.49 | **0.943** | 1.38 |
+  | 64 | 0.917 | 2.52 | **0.977** | 2.55 |
+  | 128 | 0.928 | 4.55 | **0.994** | 4.59 |
+
+  Rerank cost is a single
+  `(rerank_candidates, dim_eff) @ (dim_eff,)` matmul (~38k ops at
+  N = 100).  Latency overhead is within measurement noise on this
+  laptop.  `rerank_candidates=100` already saturates the recall
+  lift — going to 200 does not move the number.
+
+- **`.snpi` v3 file format** with `_FLAG_KEEP_FULL_PRECISION`.  v1
+  and v2 files continue to load transparently (no full-precision
+  data); v3 save/load round-trips the float32 cache byte-for-byte.
+
+- **`stats()` now reports both `bytes_per_vec` and
+  `bytes_per_vec_codes_only`** so users can see the storage delta
+  that `keep_full_precision` introduces.
+
+### Changed
+
+- `IVFPQSnapIndex` internals extract a shared `_gather_pq_scores`
+  helper so `_score_one` (default path) and `_score_one_with_rerank`
+  share the same candidate-scoring logic — including the
+  `* self._norms` scaling when `normalized=False`.  A single source
+  of truth prevents divergence of the candidate metric between the
+  two paths (a class of bugs that bit the first rev of this PR).
+
+- **`SnapIndex.delete`** is now **O(1) via swap-with-last** instead
+  of O(N) via `np.delete` + dict-rewrite.  Micro-bench at N = 10 k
+  over 500 deletes: **421× faster** (112 ms → 0.27 ms).  Unlocks
+  use cases with id churn (tenant rotation, TTL eviction).
+
+- **`SnapIndex._apply_qjl_arrays`** (the `use_prod=True` path) no
+  longer materialises a `(N, d) float32` temporary via
+  `qjl.astype(np.float32) @ S_q`.  `np.dot(qjl, S_q)` delegates the
+  mixed-type math to NumPy's C backend directly.  Latency-equivalent
+  at our sizes (both paths hit the BLAS floor) but avoids the
+  ~150 MB allocation spike per search at N = 100 k.
+
+### Documentation
+
+- README decision table adds a new row for the rerank path and
+  quotes the 0.994 recall number.
+- `docs/blog/01-numpy-perf-ceiling.md` and
+  `docs/blog/02-fast-extension.md` kept up to date with the
+  decision matrix (Numba vs Rust + PyO3) for the v0.7 accelerator
+  follow-up.
+
+### v0.7 roadmap (tracked but not in 0.6)
+
+- **`snapvec[fast]` accelerator** for the IVF-PQ search hot path.
+  Numba for prototyping, Rust + PyO3 + maturin for shipping.
+- Bit-packed PQ codes for `K < 256`.
+- `filter_ids` on `PQSnapIndex` and `IVFPQSnapIndex`.
 
 ## [0.5.0] — 2026-04-15
 
