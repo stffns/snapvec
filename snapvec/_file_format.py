@@ -20,8 +20,9 @@ xxHash3) without breaking old readers — we key off the 4-byte magic
 at position ``len(file) - 8``.
 
 Readers opt in via ``verify_checksum(path)``.  Legacy files (no
-trailer) return ``None`` from ``trailer_offset`` and skip the check.
-That keeps backward compat with every file written before v0.7.
+trailer, detected via ``has_trailer``) skip the check so files
+written before v0.7 keep working.  ``trailer_len`` is a helper for
+tests and tooling that want to know how many bytes to ignore.
 """
 from __future__ import annotations
 
@@ -29,7 +30,7 @@ import os
 import struct
 import zlib
 from pathlib import Path
-from typing import IO
+from typing import IO, Callable
 
 
 _TRAILER_MAGIC = b"CRC2"
@@ -48,22 +49,34 @@ class ChecksumWriter:
             cw.write(codes_bytes)
             # trailer is appended automatically on context exit
 
-    ``flush`` and ``close`` are forwarded to the underlying file.
+    The wrapper exposes only ``write``; callers that need ``flush`` /
+    ``close`` use the underlying file directly (the ``with open`` block
+    below the wrapper).  Keeping the surface small prevents accidental
+    ordering bugs where the trailer is written after the file closes.
     """
 
     def __init__(self, f: IO[bytes]) -> None:
         self._f = f
         self._crc = 0
+        self._finalised = False
 
     def write(self, data: bytes) -> int:
+        if self._finalised:
+            raise RuntimeError(
+                "ChecksumWriter.write called after finalise(); the "
+                "trailer has already been emitted."
+            )
         self._crc = zlib.crc32(data, self._crc)
         return self._f.write(data)
 
     def finalise(self) -> None:
-        """Write the trailer.  Safe to call multiple times (idempotent)."""
+        """Write the trailer.  Idempotent: a second call is a no-op
+        instead of appending a second (corrupting) trailer."""
+        if self._finalised:
+            return
         self._f.write(_TRAILER_MAGIC)
         self._f.write(struct.pack("<I", self._crc & 0xFFFFFFFF))
-        self._crc = 0  # guard against double-write
+        self._finalised = True
 
     def __enter__(self) -> "ChecksumWriter":
         return self
@@ -96,21 +109,27 @@ def verify_checksum(path: str | Path) -> None:
     and the parser stays simple.
     """
     path = Path(path)
-    if not has_trailer(path):
-        return
     size = path.stat().st_size
-    expected = 0
+    if size < _TRAILER_SIZE:
+        return
+    # Single open: detect trailer magic and, if present, recompute
+    # the CRC in one pass.  Avoids the second open+stat that an
+    # earlier version did via has_trailer + verify_checksum.
     with open(path, "rb") as f:
+        f.seek(size - _TRAILER_SIZE)
+        trailer = f.read(_TRAILER_SIZE)
+        if trailer[:4] != _TRAILER_MAGIC:
+            return  # legacy file; nothing to verify
+        (stored,) = struct.unpack("<I", trailer[4:])
+        f.seek(0)
         remaining = size - _TRAILER_SIZE
-        # Stream 1 MB at a time so we don't materialise huge files.
+        expected = 0
         while remaining > 0:
             chunk = f.read(min(1 << 20, remaining))
             if not chunk:
                 break
             expected = zlib.crc32(chunk, expected)
             remaining -= len(chunk)
-        f.seek(size - _TRAILER_SIZE + 4)
-        (stored,) = struct.unpack("<I", f.read(4))
     if (expected & 0xFFFFFFFF) != stored:
         raise ValueError(
             f"CRC32 mismatch in {path}: payload digests to "
@@ -127,7 +146,7 @@ def trailer_len(path: str | Path) -> int:
 
 def save_with_checksum_atomic(
     path: str | Path,
-    writer_fn,
+    writer_fn: Callable[[ChecksumWriter], None],
 ) -> None:
     """Run ``writer_fn(cw)`` against a ``ChecksumWriter`` and write to
     ``path`` atomically (``.tmp`` then ``os.replace``).

@@ -36,6 +36,43 @@ def test_trailer_magic_is_four_bytes() -> None:
     assert _TRAILER_SIZE == 8
 
 
+def test_finalise_is_idempotent(tmp_path: Path) -> None:
+    """Second call to ``finalise()`` must be a no-op rather than
+    appending a second (corrupting) trailer.  Without the idempotency
+    guard this is the exact class of bug that would produce a file
+    whose CRC digests over its own trailer."""
+    import io
+
+    from snapvec._file_format import ChecksumWriter
+
+    buf = io.BytesIO()
+    cw = ChecksumWriter(buf)
+    cw.write(b"hello world")
+    cw.finalise()
+    size_after_first = len(buf.getvalue())
+    cw.finalise()
+    size_after_second = len(buf.getvalue())
+    assert size_after_first == size_after_second, (
+        "second finalise() appended extra bytes — trailer not idempotent"
+    )
+
+
+def test_write_after_finalise_raises() -> None:
+    """Writing to a ChecksumWriter after finalise would silently
+    invalidate the trailer (the CRC no longer covers the appended
+    bytes).  Guard against that by raising."""
+    import io
+
+    from snapvec._file_format import ChecksumWriter
+
+    buf = io.BytesIO()
+    cw = ChecksumWriter(buf)
+    cw.write(b"payload")
+    cw.finalise()
+    with pytest.raises(RuntimeError, match="after finalise"):
+        cw.write(b"oops")
+
+
 def test_verify_checksum_is_noop_on_legacy_files(tmp_path: Path) -> None:
     """Files without our trailer must load fine — legacy v0.4-shipped
     .snpv files have no trailer and must keep working."""
@@ -67,24 +104,45 @@ def test_verify_checksum_raises_on_mutated_body(tmp_path: Path) -> None:
         SnapIndex.load(path)
 
 
-def test_verify_checksum_raises_on_truncated_trailer(tmp_path: Path) -> None:
+def test_truncated_trailer_falls_back_to_legacy_mode(tmp_path: Path) -> None:
+    """Chop off the entire 8-byte trailer from a freshly-saved file.
+    With the magic gone, ``has_trailer`` flips to False and
+    ``verify_checksum`` becomes a no-op — which is the correct
+    conservative contract: we can't verify something that isn't
+    there.
+
+    Also prove that the downstream loader treats the file as a
+    "legacy no-trailer" file — i.e. it still reads successfully.
+    That's important because a partial save or a mid-transfer
+    truncation shouldn't spuriously fail load() with a CRC error
+    when the actual message is "trailer is gone entirely".  A
+    missing trailer is a *weaker* guarantee than a mismatched CRC,
+    but it's a well-defined weaker guarantee.
+    """
     corpus = _unit_gaussian(30, 32, seed=0)
     idx = SnapIndex(dim=32, bits=4, normalized=True, seed=0)
     idx.add_batch(list(range(30)), corpus)
     path = tmp_path / "truncated.snpv"
     idx.save(path)
+    original_bytes = path.read_bytes()
 
-    # Chop off the last two bytes — trailer magic survives, but the
-    # stored CRC is now incomplete; the read is a short uint32.
-    # We fix this by truncating ENOUGH that has_trailer flips to
-    # False, which is the explicit "legacy" contract.  That covers
-    # the truncated-trailer case: it reverts to legacy mode, which
-    # is correct behavior (we can't verify what's missing).
-    buf = path.read_bytes()
-    path.write_bytes(buf[:-4])
-    # Now the trailer magic is gone; has_trailer returns False and
-    # verify_checksum is a no-op.
+    # Remove the full 8-byte trailer (_TRAILER_SIZE).
+    path.write_bytes(original_bytes[:-_TRAILER_SIZE])
     assert not has_trailer(path)
+
+    # verify_checksum must silently pass.
+    verify_checksum(path)
+
+    # And SnapIndex.load must still read the file successfully and
+    # produce a usable index — this is the no-regression contract
+    # for legacy v0.4-shipped files.
+    reloaded = SnapIndex.load(path)
+    assert len(reloaded) == len(idx)
+    # Same search result as the original in-memory index.
+    q = corpus[3]
+    assert [h[0] for h in idx.search(q, k=3)] == [
+        h[0] for h in reloaded.search(q, k=3)
+    ]
 
 
 # ──────────────────────────────────────────────────────────────────── #
