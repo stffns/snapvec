@@ -84,6 +84,108 @@ def test_nprobe_default_and_bounds() -> None:
         idx.search(corpus[0], k=1, nprobe=33)
 
 
+def test_search_batch_matches_per_query_loop() -> None:
+    """search_batch must produce exactly the same top-k as a per-query
+    loop over search() — in id, ordering, and score (within float
+    noise from the einsum-built batched LUT)."""
+    d, n_corpus, n_queries = 128, 1500, 25
+    corpus = _clustered(n_corpus, d, n_clusters=30, seed=81)
+    queries = _clustered(n_queries, d, n_clusters=30, seed=82)
+    ivf = IVFPQSnapIndex(
+        dim=d, nlist=32, M=16, K=64, normalized=True, seed=0,
+    )
+    ivf.fit(corpus[:1000])
+    ivf.add_batch(list(range(n_corpus)), corpus)
+
+    serial = [ivf.search(q, k=10, nprobe=16) for q in queries]
+    batched = ivf.search_batch(queries, k=10, nprobe=16, num_threads=1)
+    assert len(serial) == len(batched)
+    for i, (s, b) in enumerate(zip(serial, batched)):
+        # ordering, ids, and scores must all match
+        assert [h[0] for h in s] == [h[0] for h in b], (
+            f"batched ordering diverged from serial at query {i}"
+        )
+        assert np.allclose(
+            [h[1] for h in s], [h[1] for h in b], atol=1e-5,
+        ), f"batched scores diverged from serial at query {i}"
+
+
+def test_search_batch_threaded_matches_serial() -> None:
+    """Threaded batch must match single-thread batch results — same
+    ordering and scores, not just the same set of ids."""
+    d, n_corpus, n_queries = 128, 1500, 32
+    corpus = _clustered(n_corpus, d, n_clusters=30, seed=83)
+    queries = _clustered(n_queries, d, n_clusters=30, seed=84)
+    ivf = IVFPQSnapIndex(
+        dim=d, nlist=32, M=16, K=64, normalized=True, seed=0,
+    )
+    ivf.fit(corpus[:1000])
+    ivf.add_batch(list(range(n_corpus)), corpus)
+    serial = ivf.search_batch(queries, k=10, nprobe=16, num_threads=1)
+    threaded = ivf.search_batch(queries, k=10, nprobe=16, num_threads=4)
+    for i, (s, t) in enumerate(zip(serial, threaded)):
+        assert [h[0] for h in s] == [h[0] for h in t], (
+            f"threaded batch ordering diverged at query {i}"
+        )
+        assert np.allclose(
+            [h[1] for h in s], [h[1] for h in t], atol=1e-6,
+        ), f"threaded batch scores diverged at query {i}"
+
+
+def test_search_batch_unnormalized_matches_loop() -> None:
+    """search_batch with normalized=False (per-vector norms scaled
+    in) must still match the per-query loop, since the multi-step
+    pipeline (norm, RHT-or-not, gather, norm-multiply) is more
+    sensitive than the normalized=True path."""
+    rng = np.random.default_rng(95)
+    d, n_corpus, n_queries = 64, 500, 20
+    base = _clustered(n_corpus, d, n_clusters=20, seed=95)
+    scales = np.linspace(0.5, 5.0, n_corpus).astype(np.float32)
+    corpus = base * scales[:, None]
+    queries = _clustered(n_queries, d, n_clusters=20, seed=96)
+    ivf = IVFPQSnapIndex(
+        dim=d, nlist=16, M=8, K=64, normalized=False, seed=0,
+    )
+    ivf.fit(corpus[:300])
+    ivf.add_batch(list(range(n_corpus)), corpus)
+
+    serial = [ivf.search(q, k=5, nprobe=8) for q in queries]
+    batched = ivf.search_batch(queries, k=5, nprobe=8)
+    for i, (s, b) in enumerate(zip(serial, batched)):
+        assert [h[0] for h in s] == [h[0] for h in b], (
+            f"unnormalized batch ordering diverged at query {i}"
+        )
+
+
+def test_search_batch_handles_zero_norm_queries() -> None:
+    """Zero-norm queries in a batch must return [] for those slots,
+    not crash and not poison the rest of the batch."""
+    d, n_corpus = 64, 600
+    corpus = _clustered(n_corpus, d, seed=85)
+    queries = _clustered(5, d, seed=86)
+    queries[2] = 0  # poison one
+    ivf = IVFPQSnapIndex(
+        dim=d, nlist=16, M=16, K=16, normalized=True, seed=0,
+    )
+    ivf.fit(corpus[:500])
+    ivf.add_batch(list(range(n_corpus)), corpus)
+    out = ivf.search_batch(queries, k=5, nprobe=8)
+    assert out[2] == []
+    for i in (0, 1, 3, 4):
+        assert len(out[i]) == 5
+
+
+def test_search_batch_validates_shape() -> None:
+    corpus = _unit_gaussian(200, 32, seed=87)
+    idx = IVFPQSnapIndex(dim=32, nlist=4, M=8, K=16, normalized=True)
+    idx.fit(corpus)
+    idx.add_batch(list(range(200)), corpus)
+    with pytest.raises(ValueError, match="queries"):
+        idx.search_batch(np.zeros((3, 16), dtype=np.float32), k=1)
+    # Empty batch returns empty list.
+    assert idx.search_batch(np.zeros((0, 32), dtype=np.float32), k=1) == []
+
+
 def test_fit_warns_when_n_train_below_30x_nlist() -> None:
     """Standard FAISS sizing is ≥ 30 training samples per cluster.
     Below this, fit() should emit a UserWarning pointing to the

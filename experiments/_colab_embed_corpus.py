@@ -71,10 +71,17 @@ for split in SPLITS:
     texts = []
     for row in ds.select(range(n)):
         # corpus has (_id, title, text); queries have (_id, text) only.
+        # Skip the ". " separator when title is empty so the queries
+        # split does not embed strings starting with a leading
+        # punctuation token that is foreign to the model's input space.
         row_d: dict = dict(row)  # type: ignore[arg-type]
-        title = row_d.get("title", "") or ""
-        text = row_d.get("text", "") or ""
-        texts.append((title + ". " + text).strip()[:2000])
+        title = (row_d.get("title", "") or "").strip()
+        text = (row_d.get("text", "") or "").strip()
+        if title and text:
+            joined = f"{title}. {text}"
+        else:
+            joined = title or text
+        texts.append(joined[:2000])
     print(f"  prepared {len(texts)} text strings", flush=True)
 
     print(f"embedding in batches of {BATCH}…", flush=True)
