@@ -39,6 +39,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from ._file_format import save_with_checksum_atomic, verify_checksum
 from ._kmeans import assign_l2, kmeans_mse, probe_scores_l2_monotone
 from ._rotation import padded_dim, rht
 
@@ -800,8 +801,6 @@ class IVFPQSnapIndex:
 
     def save(self, path: str | Path) -> None:
         self._require_fitted()
-        path = Path(path)
-        tmp = path.with_suffix(path.suffix + ".tmp")
         flags = 0
         if self.normalized:
             flags |= _FLAG_NORMALIZED
@@ -810,7 +809,8 @@ class IVFPQSnapIndex:
         if self.keep_full_precision:
             flags |= _FLAG_KEEP_FULL_PRECISION
         n = len(self._ids_by_row)
-        with open(tmp, "wb") as f:
+
+        def _write(f):
             f.write(_MAGIC)
             f.write(
                 struct.pack(
@@ -841,11 +841,13 @@ class IVFPQSnapIndex:
                         )
                     f.write(struct.pack("<H", len(s)))
                     f.write(s)
-        os.replace(tmp, path)
+
+        save_with_checksum_atomic(path, _write)
 
     @classmethod
     def load(cls, path: str | Path) -> "IVFPQSnapIndex":
         path = Path(path)
+        verify_checksum(path)  # no-op for legacy files without a trailer
         with open(path, "rb") as f:
             magic = f.read(4)
             if magic != _MAGIC:

@@ -33,6 +33,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from ._file_format import save_with_checksum_atomic, verify_checksum
 from ._kmeans import kmeans_mse
 from ._rotation import padded_dim, rht
 
@@ -357,15 +358,14 @@ class PQSnapIndex:
 
     def save(self, path: str | Path) -> None:
         self._require_fitted()
-        path = Path(path)
-        tmp = path.with_suffix(path.suffix + ".tmp")
         flags = 0
         if self.normalized:
             flags |= _FLAG_NORMALIZED
         if self.use_rht:
             flags |= _FLAG_USE_RHT
         n = len(self._ids)
-        with open(tmp, "wb") as f:
+
+        def _write(f):
             f.write(_MAGIC)
             f.write(
                 struct.pack(
@@ -389,11 +389,13 @@ class PQSnapIndex:
                         )
                     f.write(struct.pack("<H", len(s)))
                     f.write(s)
-        os.replace(tmp, path)
+
+        save_with_checksum_atomic(path, _write)
 
     @classmethod
     def load(cls, path: str | Path) -> "PQSnapIndex":
         path = Path(path)
+        verify_checksum(path)  # no-op for legacy files without a trailer
         with open(path, "rb") as f:
             magic = f.read(4)
             if magic != _MAGIC:

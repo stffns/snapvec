@@ -51,6 +51,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from ._codebooks import get_codebook
+from ._file_format import save_with_checksum_atomic, verify_checksum
 from ._rotation import padded_dim, rht
 
 _MAGIC = b"SNPV"
@@ -506,10 +507,9 @@ class SnapIndex:
 
         Writes to ``<path>.tmp`` first, then renames atomically.
         Indices are bit-packed on disk (b/8 bytes per coordinate).
+        An 8-byte CRC32 trailer is appended so silent disk / transport
+        corruption is caught at ``load()`` time.
         """
-        path = Path(path)
-        tmp = path.with_suffix(path.suffix + ".tmp")
-
         n = len(self._ids)
         flags = 0
         if self.use_prod:
@@ -525,7 +525,7 @@ class SnapIndex:
         else:
             packed = _pack(self._indices, self._mse_bits)
 
-        with open(tmp, "wb") as f:
+        def _write(f):
             f.write(_MAGIC)
             f.write(struct.pack("<IIIIII", _VERSION, self.dim, self.bits, self.seed, n, flags))
             f.write(struct.pack("<I", len(packed)))
@@ -540,15 +540,19 @@ class SnapIndex:
                 f.write(struct.pack("<H", len(enc)))
                 f.write(enc)
 
-        tmp.replace(path)
+        save_with_checksum_atomic(path, _write)
 
     @classmethod
     def load(cls, path: str | Path) -> "SnapIndex":
         """Load index from a ``.snpv`` file.
 
         Supports v1 (mse-only legacy) and v2 (prod/flags) formats.
+        Verifies the CRC32 trailer when present (files saved with
+        snapvec ≥ 0.7); legacy files without a trailer load without
+        integrity checking for backward compat.
         """
         path = Path(path)
+        verify_checksum(path)
         with open(path, "rb") as f:
             magic = f.read(4)
             if magic != _MAGIC:
