@@ -2,10 +2,12 @@
 
 **Fast compressed approximate nearest-neighbor search.  Pure NumPy.  No heavy dependencies.**
 
-`snapvec` ships **two high-performance compression pipelines** for embedding vector search:
+`snapvec` ships **four index types** for embedding vector search, each targeting a different point on the accuracy / storage / latency frontier:
 
-- **`SnapIndex`** — *training-free*.  Implements [TurboQuant](https://arxiv.org/abs/2504.19874) (randomized Hadamard transform + Lloyd-Max scalar quantization).  Works out-of-the-box on any vector distribution, no calibration or corpus sample required.  Best when the dataset is dynamic or unknown up front.  Achieves **~6× / ~8× / ~12× compression at 4 / 3 / 2 bits** with **>0.92 recall@10** on real embeddings.
-- **`PQSnapIndex`** — *train-once*.  Product Quantization with k-means-learned per-subspace codebooks.  Delivers **+15–18 pp recall@10** over `SnapIndex` at matched bytes/vec on modern LLM embeddings, and opens ultra-compressed operating points (16 / 32 / 64 B/vec) that scalar quantization cannot reach.  Cost is one offline `fit(sample)` call on a representative slice of your corpus.
+- **`SnapIndex`** — *training-free scalar*.  Implements [TurboQuant](https://arxiv.org/abs/2504.19874) (randomized Hadamard transform + Lloyd-Max scalar quantization).  Works out-of-the-box on any vector distribution, no calibration or corpus sample required.  **~6× / ~8× / ~12× compression at 4 / 3 / 2 bits** with **>0.92 recall@10** on real embeddings.
+- **`ResidualSnapIndex`** — *training-free, two-stage scalar*.  Cascades coarse + residual Lloyd-Max quantization to reach operating points `SnapIndex` alone cannot (5 / 6 / 7 bits/coord with recall up to 0.96), and offers a coarse-pass + rerank search mode that converges to full-reconstruction recall at O(M) candidates instead of O(N).
+- **`PQSnapIndex`** — *train-once product quantization*.  Learns per-subspace k-means codebooks; delivers **+15–18 pp recall@10** over `SnapIndex` at matched bytes/vec on modern LLM embeddings, and opens ultra-compressed modes (16 / 32 / 64 B/vec) that scalar quantization cannot reach.  Cost is one offline `fit(sample)` call.
+- **`IVFPQSnapIndex`** — *sub-linear search at scale*.  Adds an inverted-file coarse partition on top of residual PQ.  Visits only `nprobe / nlist` of the corpus per query: **~9× faster than `PQSnapIndex` full-scan at -0.6 pp recall**, or actually exceeds full-scan recall when `nprobe ≥ nlist / 8` because per-cluster residuals have smaller variance than globally-centred vectors.
 
 ```
 pip install snapvec
@@ -41,7 +43,16 @@ On BGE-small / SciFact (3-seed mean, disjoint train/eval split):
 | `SnapIndex(bits=4)` | 256 + 4 | 0.870 | — |
 | `PQSnapIndex(M=256, K=256, use_rht=True)` | 256 | **0.948** | **+7.8 pp** |
 
-Full sweep in `experiments/bench_pq_scaleup_validation.py` (K ∈ {16, 64, 256}, 3 seeds, disjoint 2 000-vec train set).
+On augmented BGE-small @ N = 20 000 (for a regime where IVF is worth it; `M=192, K=256`):
+
+| Mode | Visits | Recall@10 | ms / query | Speedup vs PQ full-scan |
+|---|---|---|---|---|
+| `PQSnapIndex` full-scan | 100 % | 0.937 | 5.82 | 1.0× |
+| `IVFPQSnapIndex(nlist=256, nprobe=8)` | 3.1 % | 0.910 | 0.60 | **9.7×** |
+| `IVFPQSnapIndex(nlist=256, nprobe=16)` | 6.2 % | 0.931 | 0.96 | **6.1×** |
+| `IVFPQSnapIndex(nlist=256, nprobe=32)` | 12.5 % | **0.940** | 1.66 | **3.5× & higher recall** |
+
+Full sweeps in `experiments/bench_pq_scaleup_validation.py` (scalar vs PQ, K ∈ {16, 64, 256}, 3 seeds) and `experiments/bench_ivf_pq_contiguous.py` (IVF-PQ, `nlist` ∈ {128, 256, 512}).
 
 ---
 

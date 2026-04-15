@@ -4,7 +4,12 @@ All notable changes to `snapvec` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project uses [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.4.0] — 2026-04-15
+
+Headline: snapvec grows from one scalar index to a family of four
+(`SnapIndex`, `ResidualSnapIndex`, `PQSnapIndex`, `IVFPQSnapIndex`),
+covering the full accuracy / storage / latency frontier from
+training-free scalar compression to sub-linear IVF search.
 
 ### Added
 - **`IVFPQSnapIndex`** — inverted-file + residual Product Quantization
