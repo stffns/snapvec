@@ -226,12 +226,24 @@ class IVFPQSnapIndex:
     def add(self, id: Any, vector: NDArray[np.float32]) -> None:
         self.add_batch([id], np.asarray(vector, dtype=np.float32)[None, :])
 
+    # Encode vectors in chunks so peak memory stays bounded — at
+    # N=1M, d=384, M=192, the residuals matrix alone is 1.5 GB and
+    # would push a typical laptop into swap.  Tuned to keep each
+    # chunk's intermediate buffers under ~150 MB.
+    _ENCODE_CHUNK = 65_536
+
     def add_batch(
         self, ids: list[Any], vectors: NDArray[np.float32]
     ) -> None:
         """Append a batch.  Re-sorts the whole corpus by cluster id to
         preserve the contiguous layout — O(N) per call, so bulk-ingest
         before search is the intended pattern.
+
+        Encoding is chunked so peak transient memory stays bounded
+        regardless of batch size.  ``_id_to_row`` is rebuilt once at
+        the end via numpy bulk operations rather than a Python dict
+        comprehension, which avoids a O(N) interpreter pass at the
+        end of large batches.
         """
         self._require_fitted()
         arr = np.asarray(vectors, dtype=np.float32)
@@ -239,62 +251,85 @@ class IVFPQSnapIndex:
             raise ValueError(
                 f"vectors must be shape (n, {self.dim}); got {arr.shape}"
             )
-        if len(arr) == 0:
+        n = len(arr)
+        if n == 0:
             return
-        if len(ids) != len(arr):
+        if len(ids) != n:
             raise ValueError(
                 f"ids and vectors must have the same length; "
-                f"got {len(ids)} ids and {len(arr)} vectors"
+                f"got {len(ids)} ids and {n} vectors"
             )
-        # Reject duplicates up front — both within the batch and
-        # against ids already indexed.  Silently accepting them would
-        # let search return the wrong vector (the dict collapses the
-        # earlier row) even though the codes array still stores it.
-        seen_in_batch: set[Any] = set()
-        for id_val in ids:
-            if id_val in seen_in_batch:
-                raise ValueError(f"duplicate id in batch: {id_val!r}")
-            seen_in_batch.add(id_val)
-            if id_val in self._id_to_row:
-                raise ValueError(f"id already indexed: {id_val!r}")
+        # Reject duplicates up front (within the batch + against the
+        # already-indexed set).  Done with a single set construction
+        # and one membership pass over _id_to_row, instead of an
+        # interleaved per-id loop.
+        new_set = set(ids)
+        if len(new_set) != n:
+            # Find the first duplicate for a useful error message.
+            seen: set[Any] = set()
+            for id_val in ids:
+                if id_val in seen:
+                    raise ValueError(f"duplicate id in batch: {id_val!r}")
+                seen.add(id_val)
+        clash = new_set & self._id_to_row.keys()
+        if clash:
+            raise ValueError(
+                f"id already indexed: {next(iter(clash))!r}"
+            )
 
-        pre, norms = self._preprocess(arr)
-        asn_new = assign_l2(pre, self._coarse)
-        residuals = pre - self._coarse[asn_new]
-        new_codes = np.empty((len(arr), self.M), dtype=np.uint8)
-        for j in range(self.M):
-            Rj = residuals[:, j * self._d_sub : (j + 1) * self._d_sub].astype(np.float32)
-            d2 = (
-                (Rj ** 2).sum(1, keepdims=True)
-                - 2 * Rj @ self._codebooks[j].T
-                + (self._codebooks[j] ** 2).sum(1)[None, :]
-            )
-            new_codes[:, j] = d2.argmin(1).astype(np.uint8)
+        # Encode in chunks → bounded peak memory.
+        new_codes = np.empty((n, self.M), dtype=np.uint8)
+        new_asn = np.empty(n, dtype=np.int64)
+        new_norms = np.empty(n if not self.normalized else 0, dtype=np.float32)
+        cb_norms = (self._codebooks ** 2).sum(2)  # (M, K) precomputed
+        cb_T = np.transpose(self._codebooks, (0, 2, 1))  # (M, d_sub, K)
+        for start in range(0, n, self._ENCODE_CHUNK):
+            end = min(start + self._ENCODE_CHUNK, n)
+            sub = arr[start:end]
+            pre, norms = self._preprocess(sub)
+            asn_chunk = assign_l2(pre, self._coarse)
+            new_asn[start:end] = asn_chunk
+            residuals = pre - self._coarse[asn_chunk]
+            for j in range(self.M):
+                Rj = residuals[:, j * self._d_sub : (j + 1) * self._d_sub]
+                # ‖R - c_j,k‖² = ‖R‖² − 2 R · c + ‖c‖²
+                d2 = (
+                    (Rj * Rj).sum(1, keepdims=True)
+                    - 2 * Rj @ cb_T[j]
+                    + cb_norms[j][None, :]
+                )
+                new_codes[start:end, j] = d2.argmin(1).astype(np.uint8)
+            if not self.normalized:
+                new_norms[start:end] = norms
 
-        # Merge with existing storage, then re-sort by cluster id.
-        combined_codes = (
-            new_codes if len(self._codes) == 0
-            else np.vstack([self._codes, new_codes])
-        )
-        combined_ids = self._ids_by_row + list(ids)
-        existing_asn = self._cluster_ids_from_offsets() if len(self._codes) > 0 else np.zeros(0, dtype=np.int64)
-        combined_asn = np.concatenate([existing_asn, asn_new])
-        if not self.normalized:
-            combined_norms = (
-                norms if len(self._norms) == 0
-                else np.concatenate([self._norms, norms])
-            )
+        # Combine with existing state, sort once by cluster id.
+        if len(self._codes) == 0:
+            combined_codes = new_codes
+            combined_asn = new_asn
+            combined_ids_seq: list[Any] = list(ids)
+            combined_norms = new_norms
         else:
-            combined_norms = np.empty(0, dtype=np.float32)
+            combined_codes = np.vstack([self._codes, new_codes])
+            combined_asn = np.concatenate(
+                [self._cluster_ids_from_offsets(), new_asn]
+            )
+            combined_ids_seq = self._ids_by_row + list(ids)
+            combined_norms = (
+                new_norms if self.normalized
+                else np.concatenate([self._norms, new_norms])
+            )
 
         order = np.argsort(combined_asn, kind="stable")
         self._codes = combined_codes[order]
-        self._ids_by_row = [combined_ids[i] for i in order]
+        # Reorder ids via numpy object array → bulk gather in C, no
+        # Python list comprehension over N elements.
+        ids_arr = np.array(combined_ids_seq, dtype=object)
+        self._ids_by_row = ids_arr[order].tolist()
         if not self.normalized:
             self._norms = combined_norms[order]
         counts = np.bincount(combined_asn, minlength=self.nlist)
         self._offsets = np.concatenate([[0], np.cumsum(counts)]).astype(np.int64)
-        self._id_to_row = {v: i for i, v in enumerate(self._ids_by_row)}
+        self._id_to_row = dict(zip(self._ids_by_row, range(len(self._ids_by_row))))
 
     def _cluster_ids_from_offsets(self) -> NDArray[np.int64]:
         """Reconstruct the per-row cluster id from ``_offsets``."""
