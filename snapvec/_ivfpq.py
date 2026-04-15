@@ -297,6 +297,7 @@ class IVFPQSnapIndex(FreezableIndex):
     # ──────────────────────────────────────────────────────────────── #
 
     def add(self, id: Any, vector: NDArray[np.float32]) -> None:
+        self._check_not_frozen("add")
         self.add_batch([id], np.asarray(vector, dtype=np.float32)[None, :])
 
     # Encode vectors in chunks so peak memory stays bounded — at
@@ -476,9 +477,13 @@ class IVFPQSnapIndex(FreezableIndex):
         rerank_candidates : int | None, default None
             When set, the IVF-PQ pass returns the top-``rerank_candidates``
             instead of top-``k``, then those are re-scored against the
-            stored full-precision (float32) vectors and the top-``k``
-            of the reranked set is returned.  Lifts recall toward the
-            float32 brute-force ceiling at the cost of one
+            stored full-precision vectors (kept as ``float16`` since
+            v0.7 to halve disk + RAM footprint; the rerank matmul
+            itself still runs in ``float32`` because ``q_pre`` is
+            ``float32`` and NumPy type-promotion widens the result),
+            and the top-``k`` of the reranked set is returned.  Lifts
+            recall toward the float32 brute-force ceiling at the cost
+            of one
             ``(rerank_candidates, dim_eff) @ (dim_eff,)`` matmul per
             query — typically <1 ms even at large nprobe.
 
@@ -758,23 +763,35 @@ class IVFPQSnapIndex(FreezableIndex):
             )
 
         if num_threads > 1 and B >= num_threads:
-            # Lazy init of the pool is guarded by a lock so two
-            # concurrent search_batch(num_threads > 1) calls cannot
-            # both observe _executor is None and each create their
-            # own (leaking the first one's threads).  After the
-            # lock block the executor reference is stable for the
-            # remainder of this call.
-            with self._executor_lock:
-                if (
-                    self._executor is None
-                    or self._executor_workers != num_threads
-                ):
-                    if self._executor is not None:
-                        self._executor.shutdown(wait=False)
-                    self._executor = ThreadPoolExecutor(
-                        max_workers=num_threads,
-                    )
-                    self._executor_workers = num_threads
+            # Double-checked locking: the common case (executor already
+            # initialised with the requested worker count) skips the
+            # lock entirely.  Only the first caller — or a caller that
+            # asks for a different ``num_threads`` after init — enters
+            # the slow path.
+            #
+            # Once the executor is created we never shut it down here:
+            # another concurrent ``search_batch()`` caller may be about
+            # to submit work to it, and ``shutdown()`` would make those
+            # submissions raise "cannot schedule new futures after
+            # shutdown".  Lifecycle management belongs in ``close()``.
+            if (
+                self._executor is None
+                or self._executor_workers != num_threads
+            ):
+                with self._executor_lock:
+                    if self._executor is None:
+                        self._executor = ThreadPoolExecutor(
+                            max_workers=num_threads,
+                        )
+                        self._executor_workers = num_threads
+                    elif self._executor_workers != num_threads:
+                        raise ValueError(
+                            f"search_batch() cannot change num_threads "
+                            f"after the executor has been initialised; "
+                            f"requested {num_threads}, existing "
+                            f"{self._executor_workers}.  Reuse the "
+                            f"same num_threads or call close() first."
+                        )
             executor = self._executor
             # ex.map blocks until all complete; futures populate results
             # in-place via the closure capture.

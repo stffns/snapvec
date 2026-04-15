@@ -227,6 +227,7 @@ class PQSnapIndex(FreezableIndex):
     # ──────────────────────────────────────────────────────────────── #
 
     def add(self, id: Any, vector: NDArray[np.float32]) -> None:
+        self._check_not_frozen("add")
         self.add_batch([id], np.asarray(vector, dtype=np.float32)[None, :])
 
     def add_batch(

@@ -4,8 +4,18 @@
 freeze/unfreeze methods, and a ``_check_not_frozen`` helper the
 mutator methods call before doing any work.  The thread-safety
 contract is: **after** ``idx.freeze()`` is called, the index's
-mutable state does not change, so reads from multiple threads are
-free of races without any locks on the hot path.
+mutable state does not change during reads, so concurrent
+``search()`` from multiple threads is free of races without any
+locks on the hot path.
+
+Individual index classes are responsible for honouring that
+contract.  In particular, any *lazy* per-index cache that is
+populated on the first query (e.g. ``SnapIndex._cache``, the lazily-
+created ``ThreadPoolExecutor`` in ``IVFPQSnapIndex``) must either
+be pre-warmed inside a ``freeze()`` override or serialised by the
+class itself — otherwise two concurrent first-queries can race on
+the lazy assignment.  The default ``freeze()`` below only flips the
+flag; subclasses extend it when they have caches to warm.
 
 This is deliberately simpler than a full reader-writer lock —
 production deployments of snapvec are "build offline, query online"

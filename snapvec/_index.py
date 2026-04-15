@@ -155,6 +155,30 @@ class SnapIndex(FreezableIndex):
         # float16 centroid cache — None until first search, evicted on writes
         self._cache: NDArray[np.float16] | None = None
 
+    def freeze(self) -> None:
+        """Freeze + pre-warm the lazy centroid cache.
+
+        ``_search_cached`` materialises ``self._cache`` on first call
+        (see the non-chunked default path).  If the caller froze the
+        index without doing a warm-up query, two concurrent searches
+        would race on that assignment — breaking the thread-safety
+        contract ``FreezableIndex`` documents.  We pre-warm here so
+        every post-freeze ``search()`` only reads the cache.
+
+        Chunked mode (``chunk_size is not None``) never touches
+        ``self._cache`` and the filtered-subset path builds per-query
+        work into local arrays, so those paths are already safe
+        without pre-warming.
+        """
+        if (
+            self.chunk_size is None
+            and self._cache is None
+            and len(self._ids) > 0
+        ):
+            indices = self._unpack_to_indices()
+            self._cache = self._centroids[indices].astype(np.float16)
+        super().freeze()
+
     # ──────────────────────────────────────────────────────────────────── #
     # RAM bit-packing helpers                                               #
     # ──────────────────────────────────────────────────────────────────── #
@@ -219,6 +243,7 @@ class SnapIndex(FreezableIndex):
 
     def add(self, id: Any, vector: NDArray[np.float32]) -> None:
         """Add a single vector.  Prefer :meth:`add_batch` for bulk inserts."""
+        self._check_not_frozen("add")
         self.add_batch([id], np.asarray(vector, dtype=np.float32).reshape(1, -1))
 
     def add_batch(self, ids: list[Any], vectors: NDArray[np.float32]) -> None:
