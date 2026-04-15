@@ -16,7 +16,7 @@ in pure NumPy.  Six well-known optimizations on the table:
 | Chunked `add_batch` (build path) | **win** | 12× |
 | Batched search API | **neutral** | 1.0× |
 | Early-stop / short-circuit probing | **loss** | 0.24× |
-| Single-query `ThreadPoolExecutor` | **loss** | 0.27× — 1.5× peak |
+| Single-query `ThreadPoolExecutor` | **loss** | 0.19× worst, 1.5× peak |
 | Quantised int8 LUT / SWAR ADC | **loss** | 0.76× |
 
 Everything that lost, lost for the **same structural reason** — and
@@ -43,7 +43,7 @@ it looks like this, repeated `M = 192` times per query:
 
 ```python
 for j in range(M):
-    scores += lut[j][cat[:, j]]
+    scores += lut[j][cat[j]]
 ```
 
 `cat` is a `(total, M)` uint8 array of PQ codes for the candidate
@@ -119,7 +119,7 @@ search path**.
 The diagnosis is the structural one I'll keep coming back to:
 
 - Default search path: **`M = 192` total NumPy dispatch calls** —
-  one fused `scores += lut[j][cat[:, j]]` per subspace, vectorised
+  one fused `scores += lut[j][cat[j]]` per subspace, vectorised
   over the whole concatenated candidate slab.
 - Early-stop path: **`nprobe × M` dispatch calls** — same gather
   per cluster, ~12 000 dispatches at nprobe=64.
@@ -140,7 +140,11 @@ processed each chunk in a worker thread.  Expected 3-4× on a
 Measured at FIQA, sweeping `nprobe ∈ {4, 8, 16, 32, 64, 128, 256}`
 × `num_threads ∈ {1, 2, 4, 8}`:
 
-| nprobe | t=1 | t=2 | t=4 | t=8 | best |
+Wall-clock columns are ms / query; the **best speedup** column is
+the best ratio of `t=1` over any `t > 1` (so > 1× = threading helps,
+< 1× = threading hurts):
+
+| nprobe | t=1 ms | t=2 ms | t=4 ms | t=8 ms | best speedup |
 |---:|---:|---:|---:|---:|---:|
 | 16 | 0.97 | 1.82 | 4.15 | 7.07 | 0.53× |
 | 32 | 1.61 | 2.83 | 6.71 | 10.31 | 0.57× |
@@ -205,9 +209,11 @@ That works beautifully when each Python call corresponds to a
 *lot* of C work — a matmul, a sum over a million elements, a
 reduction across a tensor.  It breaks down when the per-call work
 is small but happens many times.  At M=192 subspaces, even a
-pristine vectorised inner per call (~5 µs) gets *dwarfed* by the
-2 µs interpreter dispatch each call costs.  The C inside NumPy
-isn't the bottleneck — the Python *outside* it is.
+pristine vectorised inner per call is only a few microseconds — the
+~2 µs of interpreter dispatch per call is then the same order of
+magnitude as the work itself, and ~30-40% of every call goes to
+overhead.  The C inside NumPy isn't the bottleneck — the Python
+*outside* it is.
 
 The conventional NumPy optimization advice — vectorise loops,
 release the GIL, batch computations — is correct but **assumes the
@@ -225,7 +231,8 @@ cost is one memory access, not one interpreter round-trip.
 ## What this means for snapvec
 
 I shipped what worked, archived what didn't with measured numbers
-in a [`PERF_NOTES.md`](https://github.com/stffns/snapvec/blob/main/experiments/PERF_NOTES.md)
+in [`experiments/PERF_NOTES.md`](../../experiments/PERF_NOTES.md)
+(or [pinned to v0.5.0](https://github.com/stffns/snapvec/blob/v0.5.0/experiments/PERF_NOTES.md))
 file in the repo, and changed the v0.5 release narrative from
 "sub-millisecond at 1M" (impossible at this PQ rate without a
 compiled kernel) to "ms-level latency at competitive recall, in

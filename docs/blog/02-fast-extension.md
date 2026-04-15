@@ -31,8 +31,11 @@ Recap from post #1:
 - 6 NumPy-level optimizations attempted, 4 lost for the same
   structural reason.
 - Final v0.5 ms/q at 0.91 recall ≈ 1.5 ms.  Floor: ~5 µs / candidate.
-- v0.6/v0.7 promise: an opt-in `snapvec[fast]` extra with a
-  compiled inner loop.  This is the post about that extra.
+- v0.7 promise: an opt-in `snapvec[fast]` extra with a compiled
+  inner loop.  (v0.6 was a different bet — `pq_rerank=True` to
+  break the recall ceiling — see post 02 in the series.  Latency
+  and recall ended up as orthogonal axes addressed by separate
+  releases.)  This is the post about the v0.7 extra.
 
 ## The kernel (TODO once shipped)
 
