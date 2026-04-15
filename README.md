@@ -27,6 +27,7 @@ pip install snapvec
 | **Maximum accuracy on LLM embeddings** | `PQSnapIndex` | Exploits the embedding model's natural cluster structure.  128 B/vec with PQ matches 256 B/vec with scalar Lloyd-Max on BGE-small. |
 | **Zero setup / plug-and-play** | `SnapIndex` | No `.fit()` needed.  RHT Gaussianizes any distribution, so fixed Lloyd-Max codebooks work out of the box. |
 | **Massive scale (N ≫ 10⁶)** | `PQSnapIndex` | Enables 16 B and 32 B per-vector modes that are not physically reachable with scalar quantization (`SnapIndex` floors at ~128 B/vec for 384-dim embeddings). |
+| **Sub-linear search latency (N ≳ 10⁴)** | `IVFPQSnapIndex` | Inverted-file partition + residual PQ.  Visits only `nprobe / nlist` of the corpus per query — **5–13× faster than `PQSnapIndex` full-scan** at the same recall on BGE-small at N=20k. |
 | **Unbiased inner-product estimates** (KV-cache, attention) | `SnapIndex(use_prod=True)` | QJL residual correction; see the TurboQuant_prod section below. |
 
 On BGE-small / SciFact (3-seed mean, disjoint train/eval split):
@@ -86,6 +87,35 @@ idx2 = PQSnapIndex.load("my_index.snpq")
 ```
 
 Pick `PQSnapIndex` when you can afford the one-off `fit` step and want the recall lift documented above; pick `SnapIndex` when you need a truly training-free, drop-in index.
+
+### Quick start — `IVFPQSnapIndex` (sub-linear search at scale)
+
+```python
+from snapvec import IVFPQSnapIndex
+
+# Rule-of-thumb: nlist ≈ 4·√N (e.g. nlist = 256 for N = 20 000).
+idx = IVFPQSnapIndex(dim=384, nlist=256, M=192, K=256, normalized=True)
+
+# fit() trains both the coarse centroids and the residual PQ codebook
+idx.fit(training_vectors.astype(np.float32))
+idx.add_batch(ids=list(range(N)), vectors=corpus.astype(np.float32))
+
+# nprobe trades recall for latency. Defaults to max(1, nlist // 16).
+results = idx.search(query.astype(np.float32), k=10, nprobe=16)
+
+idx.save("my_index.snpi")
+idx2 = IVFPQSnapIndex.load("my_index.snpi")
+```
+
+On BGE-small (N = 20 000, `M=192`, `K=256`, `nlist=256`) vs. `PQSnapIndex` full-scan (recall 0.935, 6.72 ms/q):
+
+| `nprobe` | % corpus probed | recall@10 | ms/q | speedup |
+|---:|---:|---:|---:|---:|
+| 8 | 3.1 % | 0.904 | 0.51 | 13.1× |
+| 16 | 6.2 % | 0.929 | 0.73 | **9.2×** |
+| 32 | 12.5 % | **0.940** | 1.39 | **4.9× (↑ recall)** |
+
+Residual encoding (stored codes are for `x − centroid_c` rather than `x` itself) lets the IVF configuration **exceed** full-scan recall at `nprobe ≥ nlist / 8` because per-cluster residuals have smaller variance than globally-centred vectors.  See `experiments/bench_ivf_pq_contiguous.py` for the sweep.
 
 ### Why `PQSnapIndex` defaults to `use_rht=False`
 

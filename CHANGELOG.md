@@ -7,6 +7,21 @@ the project uses [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **`IVFPQSnapIndex`** — inverted-file + residual Product Quantization
+  index with cluster-contiguous storage.  `fit()` trains `nlist` coarse
+  k-means centroids, then a shared per-subspace residual PQ codebook
+  (`M × K`) on the pooled residuals.  `add` sorts codes by coarse
+  cluster id and maintains an `offsets[nlist + 1]` array so each probed
+  cluster is a contiguous slice instead of a dynamic boolean mask.
+  Search visits only `nprobe / nlist` of the corpus and merges
+  probed-cluster scores with the per-cluster ADC LUT offset by
+  `⟨q, centroid_c⟩`. On BGE-small (N = 20 000, `M=192`, `K=256`,
+  `nlist=256`) this delivers **9.2× speedup at recall 0.929**
+  (`nprobe=16`), **4.9× speedup at recall 0.940** (`nprobe=32`,
+  actually exceeding `PQSnapIndex` full-scan recall because the
+  residuals centered at each cluster centroid have lower variance than
+  globally-centred vectors).  New persistent format `.snpi` (magic
+  `SNPI`, v1).
 - **`PQSnapIndex`** — product-quantization index with learned codebooks.
   Splits the embedding into `M` subspaces of equal size (exact division
   required — no ragged last subspace in v1), trains a per-subspace

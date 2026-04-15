@@ -33,6 +33,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from ._kmeans import kmeans_mse
 from ._rotation import padded_dim, rht
 
 _MAGIC = b"SNPQ"
@@ -58,60 +59,6 @@ def _decode_id(raw: str) -> Any:
             return float(raw)
         except ValueError:
             return raw
-
-
-def _kmeans_pp_init(
-    X: NDArray[np.float32], K: int, rng: np.random.Generator
-) -> NDArray[np.float32]:
-    """K-means++ seeding on ``X`` with ``K`` centers.
-
-    Falls back to uniform sampling when every point is already zero-
-    distance from the selected centres — e.g. duplicated points or
-    fewer unique values than ``K``.  The guard prevents the
-    ``rng.choice(..., p=[0, 0, ...])`` ValueError.
-    """
-    n = X.shape[0]
-    centers = [X[int(rng.integers(n))]]
-    d2 = ((X - centers[0]) ** 2).sum(1)
-    for _ in range(1, K):
-        total = d2.sum()
-        if total > 1e-12:
-            probs = d2 / total
-        else:
-            probs = np.full(n, 1.0 / n)
-        nxt = int(rng.choice(n, p=probs))
-        centers.append(X[nxt])
-        d2 = np.minimum(d2, ((X - centers[-1]) ** 2).sum(1))
-    return np.stack(centers).astype(np.float32)
-
-
-def _kmeans_mse(
-    X: NDArray[np.float32], K: int, n_iters: int, seed: int,
-) -> NDArray[np.float32]:
-    """Plain Lloyd k-means under Euclidean distance.
-
-    Cluster reassignment uses the ``‖x‖² − 2x·c + ‖c‖²`` form to keep
-    assignment O(N·K·d_sub) per iteration without building the
-    ``(N, K, d_sub)`` broadcast tensor.
-    """
-    rng = np.random.default_rng(seed)
-    C = _kmeans_pp_init(X, K, rng)
-    x_sq = (X ** 2).sum(1, keepdims=True)
-    for _ in range(n_iters):
-        d2 = x_sq - 2 * X @ C.T + (C ** 2).sum(1)[None, :]
-        asn = d2.argmin(1)
-        newC = np.empty_like(C)
-        for k in range(K):
-            m = asn == k
-            if m.any():
-                newC[k] = X[m].mean(0)
-            else:
-                # Dead cluster — reseed to the worst-fit point.
-                newC[k] = X[d2.min(1).argmax()]
-        if np.allclose(newC, C, atol=1e-5):
-            return newC
-        C = newC
-    return C
 
 
 class PQSnapIndex:
@@ -263,7 +210,7 @@ class PQSnapIndex:
         pre, _ = self._preprocess(arr)
         for j in range(self.M):
             Xj = pre[:, j * self._d_sub : (j + 1) * self._d_sub]
-            self._codebooks[j] = _kmeans_mse(
+            self._codebooks[j] = kmeans_mse(
                 Xj, self.K, n_iters=kmeans_iters, seed=self.seed + j,
             )
         self._fitted = True
