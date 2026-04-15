@@ -370,12 +370,25 @@ def test_full_precision_cache_is_fp16_in_memory() -> None:
 
 
 def test_fp16_cache_recall_matches_fp32_within_noise() -> None:
-    """fp16 is the v0.7 default for the rerank cache.  At typical
-    rerank-pool sizes the precision loss in the float16 storage is
-    negligible — rerank recall must stay within <0.02 of what the
-    fp32 path would have produced.  We assert this via an A/B with
-    an explicit fp32 cache (built by casting the stored fp16 back up
-    and running the rerank against *that*)."""
+    """fp16 is the v0.7 default for the rerank cache.  The precision
+    loss from the float32 → float16 cast (at ``add_batch`` time) must
+    leave rerank recall within a small delta of what the un-truncated
+    float32 cache would have produced.
+
+    Correctness hazard this test guards against (caught in PR #31
+    review): an earlier version of the test upcast the *stored* fp16
+    back to fp32 and ran both paths against that.  Since upcasting
+    preserves every representable fp16 value exactly, the two runs
+    produced bit-identical scores — the assertion was vacuously
+    satisfied and a future regression that made the cast lossier
+    would have slipped through.
+
+    Fix: reconstruct the *pre-truncation* fp32 cache by re-running
+    ``_preprocess`` on the original float32 corpus.  The fp32 cache
+    holds the true values before quantisation; the fp16 cache holds
+    the quantised ones.  The A/B now actually exercises the cast's
+    rounding error.
+    """
     d, n_corpus, n_queries = 64, 1200, 40
     corpus = _clustered(n_corpus, d, n_clusters=25, seed=150)
     queries = _clustered(n_queries, d, n_clusters=25, seed=151)
@@ -394,22 +407,49 @@ def test_fp16_cache_recall_matches_fp32_within_noise() -> None:
          for q in queries], truth, 10,
     )
 
-    # fp32 shadow: swap the cache for a fp32 copy of exactly the same
-    # stored bytes (upcast fp16 → fp32 preserves every representable
-    # value exactly, so any remaining delta comes from the fp16-storage
-    # rounding, not from a different search path).
-    original = idx._full_precision
-    idx._full_precision = original.astype(np.float32)
+    # True fp32 reference: re-run the same preprocessing on the
+    # original float32 corpus, *without* the fp16 cast the index
+    # applies.  Then reorder to match the cluster-sorted row layout
+    # the index holds internally — row i in our fp32 reference must
+    # correspond to the same vector as row i in the fp16 cache.  The
+    # ids in ``_ids_by_row`` are integers 0..n, so they double as
+    # indices back into the original corpus.
+    pre_fp32, _ = idx._preprocess(corpus.astype(np.float32))
+    fp32_cache = pre_fp32[np.array(idx._ids_by_row, dtype=np.int64)]
+    assert fp32_cache.dtype == np.float32
+    assert fp32_cache.shape == idx._full_precision.shape
+
+    original_fp16 = idx._full_precision
+    idx._full_precision = fp32_cache
     try:
         r_fp32 = _recall(
             [[h[0] for h in idx.search(q, k=10, nprobe=8, rerank_candidates=40)]
              for q in queries], truth, 10,
         )
     finally:
-        idx._full_precision = original
+        idx._full_precision = original_fp16
+
     assert abs(r_fp16 - r_fp32) < 0.02, (
-        f"fp16 recall {r_fp16:.3f} diverged from fp32 {r_fp32:.3f} by "
-        f"{abs(r_fp16 - r_fp32):.3f}; fp16 cache precision is too lossy"
+        f"fp16 recall {r_fp16:.3f} diverged from the un-truncated fp32 "
+        f"reference {r_fp32:.3f} by {abs(r_fp16 - r_fp32):.3f}; the "
+        f"fp16 cache cast is now materially lossy"
+    )
+    # And sanity: the two runs MUST differ at least a little in
+    # score space (otherwise we regressed to the vacuous version).
+    # Pick one query and confirm at least one score changed.
+    hits_fp16 = idx.search(queries[0], k=10, nprobe=8, rerank_candidates=40)
+    idx._full_precision = fp32_cache
+    try:
+        hits_fp32 = idx.search(queries[0], k=10, nprobe=8, rerank_candidates=40)
+    finally:
+        idx._full_precision = original_fp16
+    scores_differ = any(
+        abs(a[1] - b[1]) > 1e-8
+        for a, b in zip(hits_fp16, hits_fp32)
+    )
+    assert scores_differ, (
+        "fp16 and fp32 produced byte-identical scores — test regressed "
+        "back to the vacuous version it was meant to replace"
     )
 
 
