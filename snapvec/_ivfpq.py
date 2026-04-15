@@ -44,8 +44,8 @@ from ._kmeans import assign_l2, kmeans_mse, probe_scores_l2_monotone
 from ._rotation import padded_dim, rht
 
 _MAGIC = b"SNPI"
-_VERSION = 3  # v3: optional float32 full-precision rerank cache
-_LEGACY_VERSIONS = {1, 2}
+_VERSION = 4  # v4: rerank cache stored as float16 (half the storage of v3)
+_LEGACY_VERSIONS = {1, 2, 3}
 _MAX_ID_BYTES = 0xFFFF
 
 # Standard FAISS rule of thumb for stable coarse k-means: at least
@@ -157,8 +157,13 @@ class IVFPQSnapIndex:
         # for the `rerank_candidates` search path.  Stored cluster-
         # contiguously and kept in sync with _codes by add_batch / delete.
         # Layout (n, dim_eff) where dim_eff is pdim if use_rht else dim.
-        self._full_precision: NDArray[np.float32] = np.zeros(
-            (0, pdim), dtype=np.float32,
+        # Stored as float16 to halve both disk and RAM footprint of
+        # the rerank cache at a negligible recall cost (~0.01 abs on
+        # FIQA; see bench_fp16_cache.py).  NumPy promotes fp16 to
+        # fp32 internally on matmul so the rerank hot path is
+        # unchanged in terms of arithmetic precision.
+        self._full_precision: NDArray[np.float16] = np.zeros(
+            (0, pdim), dtype=np.float16,
         )
 
         # Internal row (cluster-sorted) → external id mapping.
@@ -341,9 +346,9 @@ class IVFPQSnapIndex:
         new_asn = np.empty(n, dtype=np.int64)
         new_norms = np.empty(n if not self.normalized else 0, dtype=np.float32)
         new_full = (
-            np.empty((n, self._pdim), dtype=np.float32)
+            np.empty((n, self._pdim), dtype=np.float16)
             if self.keep_full_precision else
-            np.empty((0, self._pdim), dtype=np.float32)
+            np.empty((0, self._pdim), dtype=np.float16)
         )
         cb_norms = (self._codebooks ** 2).sum(2)             # (M, K)
         cb_T = np.transpose(self._codebooks, (0, 2, 1))      # (M, d_sub, K)
@@ -786,7 +791,7 @@ class IVFPQSnapIndex:
             "fitted": self._fitted,
             "bytes_per_vec": (
                 bytes_per_vec
-                + (self._pdim * 4 if self.keep_full_precision else 0)
+                + (self._pdim * 2 if self.keep_full_precision else 0)
             ),
             "bytes_per_vec_codes_only": bytes_per_vec,
             "cluster_size_min": int(sizes.min()) if len(sizes) else 0,
@@ -920,10 +925,20 @@ class IVFPQSnapIndex:
                 if not normalized:
                     idx._norms = np.frombuffer(f.read(n * 4), dtype=np.float32).copy()
                 if keep_full_precision:
-                    idx._full_precision = (
-                        np.frombuffer(f.read(n * pdim * 4), dtype=np.float32)
-                        .reshape(n, pdim).copy()
-                    )
+                    # v3 stored the cache as float32 (4 bytes/value);
+                    # v4+ uses float16 (2 bytes/value).  Cast the v3
+                    # legacy payload down on load so the in-memory
+                    # layout is always fp16 regardless of file age.
+                    if version <= 3:
+                        raw = np.frombuffer(
+                            f.read(n * pdim * 4), dtype=np.float32,
+                        ).reshape(n, pdim)
+                        idx._full_precision = raw.astype(np.float16)
+                    else:
+                        idx._full_precision = (
+                            np.frombuffer(f.read(n * pdim * 2), dtype=np.float16)
+                            .reshape(n, pdim).copy()
+                        )
                 idx._ids_by_row = []
                 for _ in range(n):
                     (ln,) = struct.unpack("<H", f.read(2))

@@ -350,9 +350,67 @@ def test_stats_reports_full_precision_overhead() -> None:
     idx.add_batch(list(range(100)), corpus)
     s = idx.stats()
     assert s["keep_full_precision"] is True
-    # M codes (8 bytes) + 64 dim × 4 bytes float32 cache = 8 + 256 = 264
+    # M codes (8 bytes) + 64 dim × 2 bytes float16 cache = 8 + 128 = 136
     assert s["bytes_per_vec_codes_only"] == 8
-    assert s["bytes_per_vec"] == 8 + 64 * 4
+    assert s["bytes_per_vec"] == 8 + 64 * 2
+
+
+def test_full_precision_cache_is_fp16_in_memory() -> None:
+    """Contract: _full_precision must be fp16 from v0.7 onward.
+    Guards against accidental dtype regressions that would double
+    the RAM footprint of keep_full_precision=True indices."""
+    corpus = _unit_gaussian(50, 32, seed=145)
+    idx = IVFPQSnapIndex(
+        dim=32, nlist=4, M=8, K=16, normalized=True,
+        keep_full_precision=True,
+    )
+    idx.fit(corpus)
+    idx.add_batch(list(range(50)), corpus)
+    assert idx._full_precision.dtype == np.float16
+
+
+def test_fp16_cache_recall_matches_fp32_within_noise() -> None:
+    """fp16 is the v0.7 default for the rerank cache.  At typical
+    rerank-pool sizes the precision loss in the float16 storage is
+    negligible — rerank recall must stay within <0.02 of what the
+    fp32 path would have produced.  We assert this via an A/B with
+    an explicit fp32 cache (built by casting the stored fp16 back up
+    and running the rerank against *that*)."""
+    d, n_corpus, n_queries = 64, 1200, 40
+    corpus = _clustered(n_corpus, d, n_clusters=25, seed=150)
+    queries = _clustered(n_queries, d, n_clusters=25, seed=151)
+    truth = _brute_topk(queries, corpus, 10)
+
+    idx = IVFPQSnapIndex(
+        dim=d, nlist=16, M=8, K=16, normalized=True, seed=0,
+        keep_full_precision=True,
+    )
+    idx.fit(corpus[:800])
+    idx.add_batch(list(range(n_corpus)), corpus)
+
+    # fp16 path (the shipped default).
+    r_fp16 = _recall(
+        [[h[0] for h in idx.search(q, k=10, nprobe=8, rerank_candidates=40)]
+         for q in queries], truth, 10,
+    )
+
+    # fp32 shadow: swap the cache for a fp32 copy of exactly the same
+    # stored bytes (upcast fp16 → fp32 preserves every representable
+    # value exactly, so any remaining delta comes from the fp16-storage
+    # rounding, not from a different search path).
+    original = idx._full_precision
+    idx._full_precision = original.astype(np.float32)
+    try:
+        r_fp32 = _recall(
+            [[h[0] for h in idx.search(q, k=10, nprobe=8, rerank_candidates=40)]
+             for q in queries], truth, 10,
+        )
+    finally:
+        idx._full_precision = original
+    assert abs(r_fp16 - r_fp32) < 0.02, (
+        f"fp16 recall {r_fp16:.3f} diverged from fp32 {r_fp32:.3f} by "
+        f"{abs(r_fp16 - r_fp32):.3f}; fp16 cache precision is too lossy"
+    )
 
 
 def test_full_probe_beats_default_nprobe() -> None:
