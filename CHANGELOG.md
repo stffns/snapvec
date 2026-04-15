@@ -6,6 +6,83 @@ the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-04-15
+
+Headline: an evidence-driven perf sprint for `IVFPQSnapIndex`.
+Search-side wins are modest in pure NumPy (the hot path is dispatch-
+bound at M = 192 — the rest of the slack only opens up with a
+compiled inner loop), but the build path, the API surface and the
+documentation each got a real lift.  See `PERF_DECISION.md` for the
+sprint synthesis and `experiments/PERF_NOTES.md` for the negative-
+result archive.
+
+### Added
+- **`IVFPQSnapIndex.search_batch(queries, k, nprobe, num_threads)`** —
+  ergonomic batched API.  Builds the per-batch coarse score matrix
+  and the `(B, M, K)` LUT tensor with single BLAS calls instead of
+  looping `search()` per query, with optional `ThreadPoolExecutor`
+  parallelism for the per-query gather + scoring phase.
+  Performance-neutral (~1×) vs per-query loop in pure NumPy because
+  Apple Accelerate / Intel MKL already amortise; future-proof for the
+  v0.6 numba kernel.
+- **`IVFPQSnapIndex.close()`** — explicit thread pool teardown for
+  long-lived processes that cycle indices.
+- **n_train sizing warning + docs** — `IVFPQSnapIndex.fit()` raises a
+  `UserWarning` when `n_train < 30 · nlist` (the FAISS rule of thumb),
+  with the actual ratio and recommended size.  README adds a "Sizing
+  nlist and the training set" subsection with a concrete table for
+  N ∈ {10k, 100k, 1M, 10M}.
+- **`PERF_DECISION.md`** — one-page sprint synthesis kept at the repo
+  root: what we measured, what we shipped, what we dropped, why the
+  original "1M / 0.94 / <1 ms" target shifted, and the v0.6 roadmap.
+- **`experiments/PERF_NOTES.md`** — negative-result archive with
+  measured A/B for every technique that did not pan out (early-stop
+  probing, single-query `num_threads`, quantised LUT / SWAR), so we
+  do not burn the budget twice on the same ideas.
+
+### Changed
+- **`add_batch` is 12× faster at N = 1M** (827s → 70s) via chunked
+  residual encoding (peak transient memory bounded under ~150 MB).
+  The previous N = 1M cost was dominated by swap, not algorithm.
+- **`IVFPQSnapIndex` codes are now stored column-major `(M, n)`** so
+  the per-subspace gather inside `search()` is a contiguous slice
+  instead of a stride-M lookup.  ~12% latency win on the search hot
+  path; structurally enables the cleaner gather patterns the rest of
+  the sprint relies on.
+- **`.snpi` file format bumped to v2** to match the column-major
+  layout.  v1 files load transparently via a one-time transpose at
+  load time.
+- **Coarse cluster ranking now uses the L2-monotone score**
+  `2⟨q, c⟩ − ‖c‖²` instead of plain `⟨q, c⟩`, which matches the
+  metric used during k-means assignment.  Plain dot product was a
+  small but real bias since coarse centroids are means of unit
+  vectors with varying norms.
+
+### Fixed
+- `add_batch` now rejects duplicate ids (within the batch and against
+  the already-indexed set).  Silently letting them through previously
+  pointed `_id_to_row` at the wrong row.
+- `load()` now validates `_offsets` invariants (length, monotone,
+  boundary values).  Corrupted files raise instead of silently mis-
+  indexing the codes buffer.
+- Stop reading `ThreadPoolExecutor`'s private `_max_workers`
+  attribute; track the worker count explicitly.
+
+### Documentation
+- README "Which Index should I use?" table now references the FIQA-
+  queries recall sweep numbers from `bench_ivf_pq_fiqa_recall.py`
+  instead of the augmented-corpus baseline that had its own ceiling
+  artefact.
+
+### v0.6 roadmap (tracked but not in 0.5)
+- `pq_rerank=True`: float32 rerank of the IVF-PQ top-N to break the
+  `K = 256` PQ ceiling at 0.929 recall@10.
+- Optional `numba` accelerator (`snapvec[fast]`) that fuses the per-
+  subspace gather + sum into a single SIMD inner loop, removing
+  NumPy's per-iteration dispatch floor.
+- Bit-packed PQ codes for `K < 256`.
+- `filter_ids` on `PQSnapIndex` and `IVFPQSnapIndex`.
+
 ## [0.4.0] — 2026-04-15
 
 Headline: snapvec grows from one scalar index to a family of four
