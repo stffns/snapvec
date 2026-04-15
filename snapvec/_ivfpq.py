@@ -930,10 +930,23 @@ class IVFPQSnapIndex:
                     # legacy payload down on load so the in-memory
                     # layout is always fp16 regardless of file age.
                     if version <= 3:
-                        raw = np.frombuffer(
-                            f.read(n * pdim * 4), dtype=np.float32,
-                        ).reshape(n, pdim)
-                        idx._full_precision = raw.astype(np.float16)
+                        # Stream the cast in row-chunks so peak RAM
+                        # stays bounded instead of materialising the
+                        # full float32 payload (1.5 GB at N=1M, d=384)
+                        # alongside the fp16 output.
+                        idx._full_precision = np.empty(
+                            (n, pdim), dtype=np.float16,
+                        )
+                        rows_per_chunk = max(
+                            1, (1 << 20) // (pdim * 4),  # ≈ 1 MB of fp32 per chunk
+                        )
+                        for start in range(0, n, rows_per_chunk):
+                            end = min(start + rows_per_chunk, n)
+                            chunk = np.frombuffer(
+                                f.read((end - start) * pdim * 4),
+                                dtype=np.float32,
+                            ).reshape(end - start, pdim)
+                            idx._full_precision[start:end] = chunk
                     else:
                         idx._full_precision = (
                             np.frombuffer(f.read(n * pdim * 2), dtype=np.float16)
