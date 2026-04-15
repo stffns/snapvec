@@ -6,6 +6,71 @@ the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-04-15
+
+Headline: **tier-1 production reliability + halved rerank cache**.
+Two features that make `snapvec` deployable at scale in environments
+where silent disk corruption, cloud re-encoding, or partial writes
+are real risks — and where the 4× storage cost of
+`keep_full_precision=True` in v0.6 was the main reason users
+capped out their use of the rerank path.
+
+### Added
+
+- **CRC32 trailer on every persistent format** (`.snpv`, `.snpq`,
+  `.snpr`, `.snpi`).  Catches single-bit flips on disk and mid-
+  transfer corruption at `load()` time instead of silently
+  returning wrong search results.  8-byte tail: 4-byte magic
+  `CRC2` + uint32 LE `zlib.crc32` of the preceding payload.
+  `CRC2` (not `CRC1`) leaves room to upgrade to xxHash3 later
+  without breaking old readers.
+- **Shared atomic-save helpers** in `snapvec/_file_format.py`:
+  `ChecksumWriter`, `save_with_checksum_atomic(path, writer_fn)`,
+  `verify_checksum(path)`, `has_trailer(path)`.  Each index
+  module's `save()` body shrinks to a `_write(f)` closure; the
+  `.tmp` + `os.replace` atomic-rename dance lives in one place.
+
+### Changed
+
+- **`IVFPQSnapIndex` rerank cache is now float16** (was float32
+  in v0.6).  Halves both disk *and* RAM footprint of
+  `keep_full_precision=True` indices.  NumPy upcasts fp16 → fp32
+  implicitly in the rerank matmul, so arithmetic precision is
+  unchanged — only the stored representation is quantised.
+
+  Recall A/B on BGE-small / FIQA (N = 57 638, `rerank_candidates=100`):
+
+  | nprobe | fp32 (v0.6) | fp16 (v0.7) | Δ |
+  |---:|---:|---:|---:|
+  | 32 | 0.943 | 0.943 | 0.000 |
+  | 64 | 0.977 | 0.976 | -0.001 |
+  | 128 | 0.994 | 0.993 | -0.001 |
+
+  Storage drops from 84 MB to 42 MB at N = 57 638; extrapolated to
+  1.5 GB → 768 MB at N = 1M.
+
+- **`.snpi` bumped to v4.**  v3 files (fp32 cache) load
+  transparently via a **row-chunked fp32→fp16 cast** (≈1 MB of
+  fp32 intermediate per chunk) so peak transient RAM stays
+  bounded regardless of N.
+
+### Fixed
+
+- `ChecksumWriter.finalise()` is now actually idempotent (a second
+  call is a no-op, not a second trailer).
+- `write()` after `finalise()` now raises `RuntimeError` instead of
+  silently invalidating the trailer CRC.
+- `verify_checksum` opens the file once (previously twice — once
+  via `has_trailer`, once to compute the CRC).
+
+### v0.8 roadmap
+
+- `freeze()` + thread-safe search contract (deferred from v0.7 —
+  better with more soak time).
+- `filter_ids` IVF-aware (cluster skip + pool-aware).
+- `snapvec[fast]` Numba / Rust accelerator (see
+  `docs/blog/02-fast-extension.md`).
+
 ## [0.6.0] — 2026-04-15
 
 Headline: **breaks the PQ recall ceiling**.  The v0.5.0 release
