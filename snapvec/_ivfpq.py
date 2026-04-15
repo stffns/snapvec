@@ -43,8 +43,8 @@ from ._kmeans import assign_l2, kmeans_mse, probe_scores_l2_monotone
 from ._rotation import padded_dim, rht
 
 _MAGIC = b"SNPI"
-_VERSION = 2  # v2: codes stored column-major as (M, n) for cache-friendly gather
-_LEGACY_VERSIONS = {1}
+_VERSION = 3  # v3: optional float32 full-precision rerank cache
+_LEGACY_VERSIONS = {1, 2}
 _MAX_ID_BYTES = 0xFFFF
 
 # Standard FAISS rule of thumb for stable coarse k-means: at least
@@ -57,6 +57,7 @@ _FAISS_MIN_RATIO = 30
 # Flags bitfield
 _FLAG_NORMALIZED = 1 << 0
 _FLAG_USE_RHT = 1 << 1
+_FLAG_KEEP_FULL_PRECISION = 1 << 2
 
 
 def _divisors(n: int, lo: int = 2, hi: int = 1024) -> list[int]:
@@ -109,6 +110,7 @@ class IVFPQSnapIndex:
         seed: int = 0,
         normalized: bool = False,
         use_rht: bool = False,
+        keep_full_precision: bool = False,
     ) -> None:
         if not (2 <= K <= 256):
             raise ValueError(f"K must be in [2, 256]; got {K}")
@@ -132,6 +134,7 @@ class IVFPQSnapIndex:
         self.seed = seed
         self.normalized = normalized
         self.use_rht = use_rht
+        self.keep_full_precision = keep_full_precision
 
         self._pdim = pdim
         self._d_sub = pdim // M
@@ -149,6 +152,13 @@ class IVFPQSnapIndex:
         self._codes: NDArray[np.uint8] = np.zeros((M, 0), dtype=np.uint8)
         self._offsets: NDArray[np.int64] = np.zeros(nlist + 1, dtype=np.int64)
         self._norms: NDArray[np.float32] = np.zeros(0, dtype=np.float32)
+        # Optional float32 cache of the original (post-preprocess) vectors
+        # for the `rerank_candidates` search path.  Stored cluster-
+        # contiguously and kept in sync with _codes by add_batch / delete.
+        # Layout (n, dim_eff) where dim_eff is pdim if use_rht else dim.
+        self._full_precision: NDArray[np.float32] = np.zeros(
+            (0, pdim), dtype=np.float32,
+        )
 
         # Internal row (cluster-sorted) → external id mapping.
         self._ids_by_row: list[Any] = []
@@ -329,6 +339,11 @@ class IVFPQSnapIndex:
         new_codes = np.empty((self.M, n), dtype=np.uint8)
         new_asn = np.empty(n, dtype=np.int64)
         new_norms = np.empty(n if not self.normalized else 0, dtype=np.float32)
+        new_full = (
+            np.empty((n, self._pdim), dtype=np.float32)
+            if self.keep_full_precision else
+            np.empty((0, self._pdim), dtype=np.float32)
+        )
         cb_norms = (self._codebooks ** 2).sum(2)             # (M, K)
         cb_T = np.transpose(self._codebooks, (0, 2, 1))      # (M, d_sub, K)
         for start in range(0, n, self._ENCODE_CHUNK):
@@ -349,6 +364,11 @@ class IVFPQSnapIndex:
                 new_codes[j, start:end] = d2.argmin(1).astype(np.uint8)
             if not self.normalized:
                 new_norms[start:end] = norms
+            if self.keep_full_precision:
+                # Store the post-preprocess (RHT-rotated if use_rht,
+                # unit-normed otherwise) vectors — these are the ones
+                # the search-time dot product is consistent with.
+                new_full[start:end] = pre
 
         # Combine with existing state, sort once by cluster id.
         if self._codes.shape[1] == 0:
@@ -356,6 +376,7 @@ class IVFPQSnapIndex:
             combined_asn = new_asn
             combined_ids_seq: list[Any] = list(ids)
             combined_norms = new_norms
+            combined_full = new_full
         else:
             combined_codes = np.concatenate([self._codes, new_codes], axis=1)
             combined_asn = np.concatenate(
@@ -366,6 +387,10 @@ class IVFPQSnapIndex:
                 new_norms if self.normalized
                 else np.concatenate([self._norms, new_norms])
             )
+            combined_full = (
+                np.concatenate([self._full_precision, new_full], axis=0)
+                if self.keep_full_precision else new_full
+            )
 
         order = np.argsort(combined_asn, kind="stable")
         self._codes = combined_codes[:, order]
@@ -375,6 +400,8 @@ class IVFPQSnapIndex:
         self._ids_by_row = ids_arr[order].tolist()
         if not self.normalized:
             self._norms = combined_norms[order]
+        if self.keep_full_precision:
+            self._full_precision = combined_full[order]
         counts = np.bincount(combined_asn, minlength=self.nlist)
         self._offsets = np.concatenate([[0], np.cumsum(counts)]).astype(np.int64)
         self._id_to_row = dict(zip(self._ids_by_row, range(len(self._ids_by_row))))
@@ -401,6 +428,8 @@ class IVFPQSnapIndex:
         self._ids_by_row = [self._ids_by_row[i] for i in range(len(mask)) if mask[i]]
         if not self.normalized:
             self._norms = self._norms[mask]
+        if self.keep_full_precision:
+            self._full_precision = self._full_precision[mask]
         counts = np.bincount(asn, minlength=self.nlist)
         self._offsets = np.concatenate([[0], np.cumsum(counts)]).astype(np.int64)
         self._id_to_row = {v: i for i, v in enumerate(self._ids_by_row)}
@@ -415,16 +444,41 @@ class IVFPQSnapIndex:
         query: NDArray[np.float32],
         k: int = 10,
         nprobe: int | None = None,
+        rerank_candidates: int | None = None,
     ) -> list[tuple[Any, float]]:
         """Approximate top-k via IVF probing + residual PQ ADC.
 
-        ``nprobe=None`` defaults to ``max(1, nlist // 16)``, which
-        in the benchmarks lands near the knee of the recall/speedup
-        curve (recall drop ≤ 0.02 vs. full scan, ~9× speedup).
+        Parameters
+        ----------
+        query : NDArray[np.float32]
+        k : int, default 10
+        nprobe : int | None, default ``max(1, nlist // 16)``
+            Number of coarse clusters to visit.
+        rerank_candidates : int | None, default None
+            When set, the IVF-PQ pass returns the top-``rerank_candidates``
+            instead of top-``k``, then those are re-scored against the
+            stored full-precision (float32) vectors and the top-``k``
+            of the reranked set is returned.  Lifts recall toward the
+            float32 brute-force ceiling at the cost of one
+            ``(rerank_candidates, dim_eff) @ (dim_eff,)`` matmul per
+            query — typically <1 ms even at large nprobe.
+
+            Requires ``keep_full_precision=True`` at index construction.
+            Must be ``>= k``.
         """
         self._require_fitted()
         if k < 1:
             raise ValueError(f"k must be >= 1; got {k}")
+        if rerank_candidates is not None:
+            if not self.keep_full_precision:
+                raise ValueError(
+                    "rerank_candidates requires keep_full_precision=True "
+                    "at IVFPQSnapIndex construction time."
+                )
+            if rerank_candidates < k:
+                raise ValueError(
+                    f"rerank_candidates ({rerank_candidates}) must be >= k ({k})"
+                )
         if nprobe is None:
             nprobe = self._default_nprobe
         if not (1 <= nprobe <= self.nlist):
@@ -454,29 +508,86 @@ class IVFPQSnapIndex:
             qj = q_pre[j * self._d_sub : (j + 1) * self._d_sub]
             lut[j] = self._codebooks[j] @ qj
 
-        return self._score_one(probe, coarse_dot, lut, k)
+        if rerank_candidates is None:
+            return self._score_one(probe, coarse_dot, lut, k)
+        return self._score_one_with_rerank(
+            probe, coarse_dot, lut, q_pre, k, rerank_candidates,
+        )
 
-    def _score_one(
+    def _score_one_with_rerank(
         self,
         probe: NDArray[np.int64],
         coarse_dot: NDArray[np.float32],
         lut: NDArray[np.float32],
+        q_pre: NDArray[np.float32],
         k: int,
+        rerank_candidates: int,
     ) -> list[tuple[Any, float]]:
-        """Gather → ADC sum → top-k for a single query.
+        """IVF-PQ → top-N candidates → float32 rerank → top-k.
 
-        Hot path; used by both ``search()`` and ``search_batch()``.
+        Uses the same ``_gather_pq_scores`` helper as ``_score_one`` so
+        the candidate-selection metric is identical to the non-rerank
+        path (crucially including the ``* self._norms`` scaling when
+        ``normalized=False`` — otherwise large-norm vectors could miss
+        the candidate pool entirely).  The only difference from the
+        default path is that we then look up ``_full_precision`` for
+        the winners and re-score them exactly.
+        """
+        pq_scores, row_idx = self._gather_pq_scores(probe, coarse_dot, lut)
+        total = len(pq_scores)
+        if total == 0:
+            return []
+
+        # Pick the top ``candidate_pool`` by PQ score.
+        pool = min(max(rerank_candidates, k), total)
+        top = np.argpartition(-pq_scores, pool - 1)[:pool]
+        cand_rows = row_idx[top]
+
+        # Float32 rerank: exact dot products against the cached vectors.
+        cand_full = self._full_precision[cand_rows]      # (pool, dim_eff)
+        exact_scores = cand_full @ q_pre                 # (pool,)
+        if not self.normalized:
+            exact_scores *= self._norms[cand_rows]
+
+        k_eff = min(k, pool)
+        final = np.argpartition(-exact_scores, k_eff - 1)[:k_eff]
+        final = final[np.argsort(-exact_scores[final])]
+        return [
+            (self._ids_by_row[int(cand_rows[i])], float(exact_scores[i]))
+            for i in final
+        ]
+
+    def _gather_pq_scores(
+        self,
+        probe: NDArray[np.int64],
+        coarse_dot: NDArray[np.float32],
+        lut: NDArray[np.float32],
+    ) -> tuple[NDArray[np.float32], NDArray[np.int64]]:
+        """Gather probed clusters → PQ-ADC scores + internal row ids.
+
+        Single source of truth for the contiguous gather and the
+        per-subspace ADC sum.  When ``normalized=False`` the scores
+        are scaled by the per-vector norms so any downstream top-k
+        (whether the default path or the rerank path) ranks by an
+        unbiased estimate of ``⟨q, v⟩``, not ``⟨q, v̂⟩`` where v̂ is
+        unit-length.
+
+        Returns ``(scores, row_idx)``; both empty when no probed
+        cluster contains any vectors.
         """
         starts = self._offsets[probe]
         ends = self._offsets[probe + 1]
         counts = ends - starts
         total = int(counts.sum())
         if total == 0:
-            return []
+            return (
+                np.empty(0, dtype=np.float32),
+                np.empty(0, dtype=np.int64),
+            )
 
         # Contiguous gather: each probed cluster is a contiguous slice
         # of _codes along axis=1 (column-major (M, n) layout).  Build
-        # (M, total) cat by concatenating the M-major slices once, then
+        # (M, total) cat by concatenating the M-major slices once, so
         # the per-subspace gather stays contiguous in memory.
         cat = np.empty((self.M, total), dtype=np.uint8)
         row_idx = np.empty(total, dtype=np.int64)
@@ -496,6 +607,24 @@ class IVFPQSnapIndex:
 
         if not self.normalized:
             scores *= self._norms[row_idx]
+
+        return scores, row_idx
+
+    def _score_one(
+        self,
+        probe: NDArray[np.int64],
+        coarse_dot: NDArray[np.float32],
+        lut: NDArray[np.float32],
+        k: int,
+    ) -> list[tuple[Any, float]]:
+        """Gather → ADC sum → top-k for a single query.
+
+        Hot path; used by both ``search()`` and ``search_batch()``.
+        """
+        scores, row_idx = self._gather_pq_scores(probe, coarse_dot, lut)
+        total = len(scores)
+        if total == 0:
+            return []
 
         k_eff = min(k, total)
         top = np.argpartition(-scores, k_eff - 1)[:k_eff]
@@ -652,8 +781,13 @@ class IVFPQSnapIndex:
             "K": self.K,
             "d_sub": self._d_sub,
             "use_rht": self.use_rht,
+            "keep_full_precision": self.keep_full_precision,
             "fitted": self._fitted,
-            "bytes_per_vec": bytes_per_vec,
+            "bytes_per_vec": (
+                bytes_per_vec
+                + (self._pdim * 4 if self.keep_full_precision else 0)
+            ),
+            "bytes_per_vec_codes_only": bytes_per_vec,
             "cluster_size_min": int(sizes.min()) if len(sizes) else 0,
             "cluster_size_median": int(np.median(sizes)) if len(sizes) else 0,
             "cluster_size_max": int(sizes.max()) if len(sizes) else 0,
@@ -673,6 +807,8 @@ class IVFPQSnapIndex:
             flags |= _FLAG_NORMALIZED
         if self.use_rht:
             flags |= _FLAG_USE_RHT
+        if self.keep_full_precision:
+            flags |= _FLAG_KEEP_FULL_PRECISION
         n = len(self._ids_by_row)
         with open(tmp, "wb") as f:
             f.write(_MAGIC)
@@ -693,6 +829,8 @@ class IVFPQSnapIndex:
                 f.write(np.ascontiguousarray(self._codes).tobytes())
                 if not self.normalized:
                     f.write(self._norms.tobytes())
+                if self.keep_full_precision:
+                    f.write(np.ascontiguousarray(self._full_precision).tobytes())
                 for id_val in self._ids_by_row:
                     s = str(id_val).encode("utf-8")
                     if len(s) > _MAX_ID_BYTES:
@@ -719,9 +857,11 @@ class IVFPQSnapIndex:
                 raise ValueError(f"unsupported .snpi version {version}")
             normalized = bool(flags & _FLAG_NORMALIZED)
             use_rht = bool(flags & _FLAG_USE_RHT)
+            keep_full_precision = bool(flags & _FLAG_KEEP_FULL_PRECISION)
             idx = cls(
                 dim=dim, nlist=nlist, M=M, K=K, seed=seed,
                 normalized=normalized, use_rht=use_rht,
+                keep_full_precision=keep_full_precision,
             )
             if pdim != idx._pdim or d_sub != idx._d_sub:
                 raise ValueError(
@@ -777,6 +917,11 @@ class IVFPQSnapIndex:
                     )
                 if not normalized:
                     idx._norms = np.frombuffer(f.read(n * 4), dtype=np.float32).copy()
+                if keep_full_precision:
+                    idx._full_precision = (
+                        np.frombuffer(f.read(n * pdim * 4), dtype=np.float32)
+                        .reshape(n, pdim).copy()
+                    )
                 idx._ids_by_row = []
                 for _ in range(n):
                     (ln,) = struct.unpack("<H", f.read(2))

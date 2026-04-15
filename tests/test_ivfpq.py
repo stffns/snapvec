@@ -216,6 +216,145 @@ def test_fit_does_not_warn_at_healthy_ratio() -> None:
     )
 
 
+def test_rerank_beats_pq_only_recall() -> None:
+    """rerank_candidates must lift recall above the PQ-only ceiling.
+    On clustered synthetic data with M=8 K=16 the PQ approximation is
+    aggressive enough to drop a few neighbours; the float32 rerank
+    pass should recover them."""
+    d, n_corpus, n_queries = 64, 1500, 50
+    corpus = _clustered(n_corpus, d, n_clusters=30, seed=100)
+    queries = _clustered(n_queries, d, n_clusters=30, seed=101)
+    truth = _brute_topk(queries, corpus, 10)
+
+    idx = IVFPQSnapIndex(
+        dim=d, nlist=16, M=8, K=16, normalized=True, seed=0,
+        keep_full_precision=True,
+    )
+    idx.fit(corpus[:1000])
+    idx.add_batch(list(range(n_corpus)), corpus)
+
+    r_pq = _recall(
+        [[h[0] for h in idx.search(q, k=10, nprobe=8)] for q in queries],
+        truth, 10,
+    )
+    r_rerank = _recall(
+        [[h[0] for h in idx.search(q, k=10, nprobe=8, rerank_candidates=50)]
+         for q in queries], truth, 10,
+    )
+    assert r_rerank > r_pq, (
+        f"rerank ({r_rerank:.3f}) did not improve over PQ-only ({r_pq:.3f})"
+    )
+    # And rerank with a wide candidate pool should approach the
+    # float32 ceiling.
+    r_full_rerank = _recall(
+        [[h[0] for h in idx.search(q, k=10, nprobe=16, rerank_candidates=200)]
+         for q in queries], truth, 10,
+    )
+    assert r_full_rerank >= 0.95, (
+        f"full-rerank recall {r_full_rerank:.3f} should be ≥ 0.95"
+    )
+
+
+def test_rerank_requires_keep_full_precision() -> None:
+    corpus = _unit_gaussian(200, 32, seed=110)
+    idx = IVFPQSnapIndex(
+        dim=32, nlist=4, M=8, K=16, normalized=True,
+        keep_full_precision=False,
+    )
+    idx.fit(corpus)
+    idx.add_batch(list(range(200)), corpus)
+    with pytest.raises(ValueError, match="keep_full_precision"):
+        idx.search(corpus[0], k=5, rerank_candidates=20)
+
+
+def test_rerank_candidates_must_be_at_least_k() -> None:
+    corpus = _unit_gaussian(200, 32, seed=111)
+    idx = IVFPQSnapIndex(
+        dim=32, nlist=4, M=8, K=16, normalized=True,
+        keep_full_precision=True,
+    )
+    idx.fit(corpus)
+    idx.add_batch(list(range(200)), corpus)
+    with pytest.raises(ValueError, match=">= k"):
+        idx.search(corpus[0], k=10, rerank_candidates=5)
+
+
+def test_rerank_candidate_pool_respects_norms_when_unnormalized() -> None:
+    """When ``normalized=False``, the PQ-based candidate selection
+    must scale scores by per-vector norms — otherwise a
+    high-norm vector that genuinely wins on ⟨q, v⟩ can miss the
+    candidate pool because its unit-sphere PQ score is modest.
+    This was the high-priority bug caught on the PR #27 review."""
+    rng = np.random.default_rng(140)
+    # Build corpus where recall truth depends heavily on per-vector
+    # norm magnitude: same directions scaled across a wide range.
+    d, n_corpus = 64, 400
+    base = _clustered(n_corpus, d, n_clusters=20, seed=140)
+    scales = np.linspace(0.2, 10.0, n_corpus).astype(np.float32)
+    corpus = base * scales[:, None]
+    queries = _clustered(20, d, n_clusters=20, seed=141)
+    truth = _brute_topk(queries, corpus, 10)
+
+    idx = IVFPQSnapIndex(
+        dim=d, nlist=8, M=8, K=32, normalized=False, seed=0,
+        keep_full_precision=True,
+    )
+    idx.fit(corpus[:250])
+    idx.add_batch(list(range(n_corpus)), corpus)
+    r = _recall(
+        [[h[0] for h in idx.search(q, k=10, nprobe=8, rerank_candidates=40)]
+         for q in queries], truth, 10,
+    )
+    # Without the norm scaling in the candidate-selection step, the
+    # pool would miss many large-norm winners and recall would tank.
+    # With the fix, rerank reaches > 0.8 on this stress test.
+    assert r > 0.8, (
+        f"rerank recall {r:.3f} below 0.8 — candidate selection may "
+        f"be ignoring per-vector norms in the normalized=False path."
+    )
+
+
+def test_save_load_with_full_precision_roundtrips(tmp_path: Path) -> None:
+    """File-format v3 must round-trip the float32 cache so that a
+    reloaded index reproduces rerank scores exactly."""
+    corpus = _clustered(200, 32, seed=120)
+    queries = _clustered(5, 32, seed=121)
+    idx = IVFPQSnapIndex(
+        dim=32, nlist=4, M=8, K=16, normalized=True, seed=42,
+        keep_full_precision=True,
+    )
+    idx.fit(corpus[:120])
+    idx.add_batch(list(range(200)), corpus)
+    path = tmp_path / "x.snpi"
+    idx.save(path)
+    reloaded = IVFPQSnapIndex.load(path)
+    assert reloaded.keep_full_precision
+    assert reloaded._full_precision.shape == idx._full_precision.shape
+    np.testing.assert_array_equal(
+        reloaded._full_precision, idx._full_precision,
+    )
+    for q in queries:
+        a = idx.search(q, k=3, nprobe=4, rerank_candidates=20)
+        b = reloaded.search(q, k=3, nprobe=4, rerank_candidates=20)
+        assert [x[0] for x in a] == [x[0] for x in b]
+        assert np.allclose([x[1] for x in a], [x[1] for x in b], atol=1e-6)
+
+
+def test_stats_reports_full_precision_overhead() -> None:
+    corpus = _unit_gaussian(100, 64, seed=130)
+    idx = IVFPQSnapIndex(
+        dim=64, nlist=4, M=8, K=16, normalized=True,
+        keep_full_precision=True,
+    )
+    idx.fit(corpus)
+    idx.add_batch(list(range(100)), corpus)
+    s = idx.stats()
+    assert s["keep_full_precision"] is True
+    # M codes (8 bytes) + 64 dim × 4 bytes float32 cache = 8 + 256 = 264
+    assert s["bytes_per_vec_codes_only"] == 8
+    assert s["bytes_per_vec"] == 8 + 64 * 4
+
+
 def test_full_probe_beats_default_nprobe() -> None:
     """With ``nprobe == nlist`` we scan every cluster; recall should
     converge to the PQSnapIndex full-scan baseline (same M/K, same
