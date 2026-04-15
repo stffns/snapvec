@@ -525,39 +525,21 @@ class IVFPQSnapIndex:
     ) -> list[tuple[Any, float]]:
         """IVF-PQ → top-N candidates → float32 rerank → top-k.
 
-        The PQ pass returns ``rerank_candidates`` rows by their internal
-        index (cluster-sorted row positions).  We then look up each
-        candidate's stored float32 vector and score it exactly against
-        ``q_pre`` — this recovers the recall the PQ approximation lost.
+        Uses the same ``_gather_pq_scores`` helper as ``_score_one`` so
+        the candidate-selection metric is identical to the non-rerank
+        path (crucially including the ``* self._norms`` scaling when
+        ``normalized=False`` — otherwise large-norm vectors could miss
+        the candidate pool entirely).  The only difference from the
+        default path is that we then look up ``_full_precision`` for
+        the winners and re-score them exactly.
         """
-        candidate_pool = max(rerank_candidates, k)
-        # Reuse the tight gather + ADC + top-k path to get internal row
-        # positions for the top-``candidate_pool`` PQ-scored candidates.
-        # We need internal rows (not external ids) to index into
-        # ``_full_precision``; do an inline copy of _score_one tailored
-        # to return rows + scores instead of (id, score) tuples.
-        starts = self._offsets[probe]
-        ends = self._offsets[probe + 1]
-        total = int((ends - starts).sum())
+        pq_scores, row_idx = self._gather_pq_scores(probe, coarse_dot, lut)
+        total = len(pq_scores)
         if total == 0:
             return []
-        cat = np.empty((self.M, total), dtype=np.uint8)
-        row_idx = np.empty(total, dtype=np.int64)
-        pq_scores = np.empty(total, dtype=np.float32)
-        cursor = 0
-        for s, e, c in zip(starts.tolist(), ends.tolist(), probe.tolist()):
-            n_c = e - s
-            if n_c == 0:
-                continue
-            cat[:, cursor : cursor + n_c] = self._codes[:, s:e]
-            row_idx[cursor : cursor + n_c] = np.arange(s, e, dtype=np.int64)
-            pq_scores[cursor : cursor + n_c] = coarse_dot[c]
-            cursor += n_c
-        for j in range(self.M):
-            pq_scores += lut[j][cat[j]]
 
         # Pick the top ``candidate_pool`` by PQ score.
-        pool = min(candidate_pool, total)
+        pool = min(max(rerank_candidates, k), total)
         top = np.argpartition(-pq_scores, pool - 1)[:pool]
         cand_rows = row_idx[top]
 
@@ -575,27 +557,37 @@ class IVFPQSnapIndex:
             for i in final
         ]
 
-    def _score_one(
+    def _gather_pq_scores(
         self,
         probe: NDArray[np.int64],
         coarse_dot: NDArray[np.float32],
         lut: NDArray[np.float32],
-        k: int,
-    ) -> list[tuple[Any, float]]:
-        """Gather → ADC sum → top-k for a single query.
+    ) -> tuple[NDArray[np.float32], NDArray[np.int64]]:
+        """Gather probed clusters → PQ-ADC scores + internal row ids.
 
-        Hot path; used by both ``search()`` and ``search_batch()``.
+        Single source of truth for the contiguous gather and the
+        per-subspace ADC sum.  When ``normalized=False`` the scores
+        are scaled by the per-vector norms so any downstream top-k
+        (whether the default path or the rerank path) ranks by an
+        unbiased estimate of ``⟨q, v⟩``, not ``⟨q, v̂⟩`` where v̂ is
+        unit-length.
+
+        Returns ``(scores, row_idx)``; both empty when no probed
+        cluster contains any vectors.
         """
         starts = self._offsets[probe]
         ends = self._offsets[probe + 1]
         counts = ends - starts
         total = int(counts.sum())
         if total == 0:
-            return []
+            return (
+                np.empty(0, dtype=np.float32),
+                np.empty(0, dtype=np.int64),
+            )
 
         # Contiguous gather: each probed cluster is a contiguous slice
         # of _codes along axis=1 (column-major (M, n) layout).  Build
-        # (M, total) cat by concatenating the M-major slices once, then
+        # (M, total) cat by concatenating the M-major slices once, so
         # the per-subspace gather stays contiguous in memory.
         cat = np.empty((self.M, total), dtype=np.uint8)
         row_idx = np.empty(total, dtype=np.int64)
@@ -615,6 +607,24 @@ class IVFPQSnapIndex:
 
         if not self.normalized:
             scores *= self._norms[row_idx]
+
+        return scores, row_idx
+
+    def _score_one(
+        self,
+        probe: NDArray[np.int64],
+        coarse_dot: NDArray[np.float32],
+        lut: NDArray[np.float32],
+        k: int,
+    ) -> list[tuple[Any, float]]:
+        """Gather → ADC sum → top-k for a single query.
+
+        Hot path; used by both ``search()`` and ``search_batch()``.
+        """
+        scores, row_idx = self._gather_pq_scores(probe, coarse_dot, lut)
+        total = len(scores)
+        if total == 0:
+            return []
 
         k_eff = min(k, total)
         top = np.argpartition(-scores, k_eff - 1)[:k_eff]

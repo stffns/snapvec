@@ -279,6 +279,41 @@ def test_rerank_candidates_must_be_at_least_k() -> None:
         idx.search(corpus[0], k=10, rerank_candidates=5)
 
 
+def test_rerank_candidate_pool_respects_norms_when_unnormalized() -> None:
+    """When ``normalized=False``, the PQ-based candidate selection
+    must scale scores by per-vector norms — otherwise a
+    high-norm vector that genuinely wins on ⟨q, v⟩ can miss the
+    candidate pool because its unit-sphere PQ score is modest.
+    This was the high-priority bug caught on the PR #27 review."""
+    rng = np.random.default_rng(140)
+    # Build corpus where recall truth depends heavily on per-vector
+    # norm magnitude: same directions scaled across a wide range.
+    d, n_corpus = 64, 400
+    base = _clustered(n_corpus, d, n_clusters=20, seed=140)
+    scales = np.linspace(0.2, 10.0, n_corpus).astype(np.float32)
+    corpus = base * scales[:, None]
+    queries = _clustered(20, d, n_clusters=20, seed=141)
+    truth = _brute_topk(queries, corpus, 10)
+
+    idx = IVFPQSnapIndex(
+        dim=d, nlist=8, M=8, K=32, normalized=False, seed=0,
+        keep_full_precision=True,
+    )
+    idx.fit(corpus[:250])
+    idx.add_batch(list(range(n_corpus)), corpus)
+    r = _recall(
+        [[h[0] for h in idx.search(q, k=10, nprobe=8, rerank_candidates=40)]
+         for q in queries], truth, 10,
+    )
+    # Without the norm scaling in the candidate-selection step, the
+    # pool would miss many large-norm winners and recall would tank.
+    # With the fix, rerank reaches > 0.8 on this stress test.
+    assert r > 0.8, (
+        f"rerank recall {r:.3f} below 0.8 — candidate selection may "
+        f"be ignoring per-vector norms in the normalized=False path."
+    )
+
+
 def test_save_load_with_full_precision_roundtrips(tmp_path: Path) -> None:
     """File-format v3 must round-trip the float32 cache so that a
     reloaded index reproduces rerank scores exactly."""
