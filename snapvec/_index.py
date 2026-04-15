@@ -219,9 +219,21 @@ class SnapIndex:
         """Add a single vector.  Prefer :meth:`add_batch` for bulk inserts."""
         self.add_batch([id], np.asarray(vector, dtype=np.float32).reshape(1, -1))
 
-    def _encode(self, arr: NDArray[np.float32]) -> tuple[NDArray[np.uint8], NDArray[np.float32], NDArray[np.int8] | None, NDArray[np.float32] | None]:
-        """Transform raw vectors into normalized, quantized representations."""
+    def add_batch(self, ids: list[Any], vectors: NDArray[np.float32]) -> None:
+        """Add vectors in bulk — ~50x faster than repeated :meth:`add`.
+
+        Parameters
+        ----------
+        ids : list[Any]
+            Identifier for each vector (int, str, …).  Must be unique.
+        vectors : NDArray[np.float32], shape (n, dim)
+            Raw embedding vectors (need not be normalized).
+        """
+        arr = np.asarray(vectors, dtype=np.float32)
         n = len(arr)
+        if n == 0:
+            return
+
         # 1. Normalize to unit sphere (skipped when self.normalized=True,
         #    i.e. the caller guarantees inputs already have unit length)
         if self.normalized:
@@ -264,25 +276,6 @@ class SnapIndex:
             residual_norms = (
                 np.linalg.norm(r_scaled, axis=1) / np.sqrt(pdim)
             ).astype(np.float32)
-
-        return batch_idx, batch_norms, qjl_signs, residual_norms
-
-    def add_batch(self, ids: list[Any], vectors: NDArray[np.float32]) -> None:
-        """Add vectors in bulk — ~50x faster than repeated :meth:`add`.
-
-        Parameters
-        ----------
-        ids : list[Any]
-            Identifier for each vector (int, str, …).  Must be unique.
-        vectors : NDArray[np.float32], shape (n, dim)
-            Raw embedding vectors (need not be normalized).
-        """
-        arr = np.asarray(vectors, dtype=np.float32)
-        n = len(arr)
-        if n == 0:
-            return
-
-        batch_idx, batch_norms, qjl_signs, residual_norms = self._encode(arr)
 
         # 5. RAM bit-pack indices when possible
         if self._can_pack:
