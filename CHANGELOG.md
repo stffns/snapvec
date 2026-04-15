@@ -4,6 +4,8 @@ All notable changes to `snapvec` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project uses [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
 ## [0.4.0] — 2026-04-15
 
 Headline: snapvec grows from one scalar index to a family of four
@@ -18,15 +20,18 @@ training-free scalar compression to sub-linear IVF search.
   (`M × K`) on the pooled residuals.  `add` sorts codes by coarse
   cluster id and maintains an `offsets[nlist + 1]` array so each probed
   cluster is a contiguous slice instead of a dynamic boolean mask.
-  Search visits only `nprobe / nlist` of the corpus and merges
-  probed-cluster scores with the per-cluster ADC LUT offset by
-  `⟨q, centroid_c⟩`. On BGE-small (N = 20 000, `M=192`, `K=256`,
-  `nlist=256`) this delivers **9.2× speedup at recall 0.929**
-  (`nprobe=16`), **4.9× speedup at recall 0.940** (`nprobe=32`,
-  actually exceeding `PQSnapIndex` full-scan recall because the
-  residuals centered at each cluster centroid have lower variance than
-  globally-centred vectors).  New persistent format `.snpi` (magic
-  `SNPI`, v1).
+  Cluster ranking uses the `L2`-monotone score `2⟨q, c⟩ − ‖c‖²` to
+  match the metric used during assignment (plain `⟨q, c⟩` is biased
+  because coarse centroids are means of unit vectors and their norms
+  vary).  Search visits only `nprobe / nlist` of the corpus and
+  merges probed-cluster scores with the per-cluster ADC LUT offset
+  by `⟨q, centroid_c⟩`. On BGE-small (N = 20 000, `M=192`, `K=256`,
+  `nlist=256`) this delivers **9.7× speedup at recall 0.910**
+  (`nprobe=8`), **6.1× at recall 0.931** (`nprobe=16`), and
+  **3.5× at recall 0.940** (`nprobe=32`, actually exceeding
+  `PQSnapIndex` full-scan recall because per-cluster residuals have
+  smaller variance than globally-centred vectors).  New persistent
+  format `.snpi` (magic `SNPI`, v1).
 - **`PQSnapIndex`** — product-quantization index with learned codebooks.
   Splits the embedding into `M` subspaces of equal size (exact division
   required — no ragged last subspace in v1), trains a per-subspace
