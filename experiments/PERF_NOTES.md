@@ -51,3 +51,48 @@ few visited clusters.
 **Verdict.**  Not viable in pure-NumPy.  Re-evaluate if/when we add a
 C/Cython hot path or move the per-cluster loop into a vectorised
 `numba` kernel.  Tracked as v0.6+ follow-up.
+
+## 2026-04-15 — `ThreadPoolExecutor` parallel probe in `IVFPQSnapIndex.search`
+
+**Idea.**  Split probed clusters into N chunks, fan the per-cluster
+gather + scoring out across worker threads.  NumPy releases the GIL on
+``np.take`` and contiguous-array arithmetic, so the parallelism is
+real.  Expected 3-4× speedup on a 4-core laptop.
+
+**A/B (FIQA queries vs FIQA corpus, N=57 638, nlist=512, M=192,
+K=256), num_threads ∈ {1, 2, 4, 8}:**
+
+| nprobe | t=1 | t=2 | t=4 | t=8 | best speedup |
+|---:|---:|---:|---:|---:|---:|
+| 4 | 0.49 | 1.02 | 0.47 | 0.47 | 1.05× (noise) |
+| 8 | 0.61 | 1.39 | 3.11 | 0.61 | 0.99× |
+| 16 | 0.97 | 1.82 | 4.15 | 7.07 | **0.53×** (slower!) |
+| 32 | 1.61 | 2.83 | 6.71 | 10.31 | 0.57× |
+| 64 | 2.86 | 3.94 | 7.81 | 15.42 | 0.73× |
+| 128 | 5.21 | 6.72 | 9.51 | 17.30 | 0.78× |
+| 256 | 9.77 | **6.50** | 13.10 | 19.74 | **1.50×** (only win) |
+
+**Verdict.**  Threading at the single-query level is mostly slower or
+noise.  Only at nprobe = 256 with t=2 do we see a real 1.5× — at the
+typical operating point for "0.91 recall" (nprobe = 64 at this corpus
+size) it lands at 0.73×.
+
+**Why it loses:**
+
+1. **Apple Silicon Accelerate / Intel MKL already parallelise**
+   ``np.take`` and matmul internally.  Worker threads compete with
+   the BLAS thread pool for the same physical cores.
+2. **Thread-spawn dispatch overhead** is ~200-500 µs per chunk —
+   significant when total work is < 5 ms.
+3. The operations being parallelised (the per-subspace gather + sum)
+   are already vectorised in C inside NumPy.  We add Python-level
+   coordination on top of work that was already running in parallel.
+
+**Where threading would actually pay** is at the **batch level** —
+process N independent queries in parallel, where each query has
+substantial per-thread work and the Python overhead is amortised
+across the batch.  That is the design for ``search_batch`` (task #6).
+
+**Verdict.**  Drop ``num_threads`` from ``search()`` for v0.5.  Move
+the threading concept into ``search_batch`` where the workload shape
+makes it fly.
