@@ -96,3 +96,84 @@ across the batch.  That is the design for ``search_batch`` (task #6).
 **Verdict.**  Drop ``num_threads`` from ``search()`` for v0.5.  Move
 the threading concept into ``search_batch`` where the workload shape
 makes it fly.
+
+## 2026-04-15 — SWAR / quantised LUT for the residual ADC inner loop
+
+**Idea.**  Replace the float32 per-subspace LUT with a quantised int8
+representation, accumulate scores in int16, dequantise once at the
+end.  Variants:
+
+1. **Per-subspace int8 LUT, float32 accumulator.**  Each subspace
+   stores ``(bias_j, scale_j, lut_q[j, :] uint8)``; per-iteration
+   ``scores += scale_j * lut_q[j][cat[:, j]].astype(float32)``.
+2. **Pure int16 accumulator with averaged scale.**  Idealised
+   (mathematically incorrect because per-subspace scales differ) but
+   useful as an upper-bound on what the int-only path could buy.
+3. **Pair-LUT SWAR.**  Pack two consecutive subspace codes per
+   uint16 entry, precompute ``lut_pair[p, c1·256 + c2]`` int16, and
+   reduce the inner loop from ``M`` iterations to ``M/2``.
+
+**Microbench (synthetic shapes mirroring the FIQA bench:
+total = 3500, M = 192, K = 256, 200 runs):**
+
+| variant | ms / call | speedup |
+|---|---:|---:|
+| baseline (float32 LUT) | 1.120 | 1.00× |
+| per-subspace int8 LUT | 1.480 | **0.76× (slower)** |
+| pure-int idealised | 1.325 | 0.85× (still slower) |
+
+Pair-LUT SWAR was not microbenched because **its construction cost
+alone is prohibitive at K = 256**: a per-query
+``(M/2, K²) int16`` table is ``96 × 65536 × 2 = 12 MB``, written
+from scratch every search.  At ~5 GB/s effective DRAM bandwidth on
+this laptop, that is ~2.4 ms of build cost — already more than the
+**entire** baseline search latency at the recall sweep's typical
+operating points.  And the table is too big to reuse across queries
+in a batch since it is query-dependent.
+
+**Why every variant loses in NumPy:**
+
+1. The hot path at M = 192 is **dispatch-bound, not memory-bound**.
+   Each per-subspace iteration is a single NumPy call with ~2 µs of
+   Python + dispatch overhead.  M iterations → ~400 µs of dispatch
+   floor regardless of what the per-element work costs.
+2. Reducing per-element bytes (int8 vs float32) does not help when
+   the bottleneck is iteration count.
+3. The "fused gather + add" for ``scores += lut[j][cat[:, j]]`` is
+   already a single tight C inner loop inside NumPy — adding a cast
+   or multiply per iteration just buys more dispatch.
+4. SWAR gains hinge on building a wide pair LUT, which at K = 256 is
+   too big to materialise per query.  At K = 16 it would fit in L1
+   but our deployed K is 256 for the recall it buys.
+
+**Verdict.**  Not viable in pure NumPy at our operating M and K.
+Re-evaluate when (if) we drop into a Numba / Cython / C kernel that
+fuses the per-subspace ops into a single SIMD loop — at that point
+the dispatch floor disappears and the int / SWAR pipelines become
+real wins.  Tracked as part of the v0.6+ "optional accelerator"
+roadmap.
+
+## Aggregate finding — the NumPy ceiling for IVF-PQ search
+
+Combining the negative results above, the search hot path in pure
+NumPy at M = 192, K = 256 has a **structural floor of ~5 µs per
+visited candidate** — about 1.5 ms / query at the FIQA "0.91 recall"
+operating point (nprobe = 32 visiting ~3500 candidates).
+
+What works in pure NumPy (shipping in v0.5):
+- Column-major (M, n) code storage: **~12 % latency win** on the
+  per-subspace gather.
+- Chunked encoding in ``add_batch``: **12× build-time speedup at
+  N = 1M** (memory pressure was the actual bottleneck).
+- Batched coarse + LUT in ``search_batch``: ergonomic API,
+  performance-neutral vs per-query loop in pure NumPy.
+
+What does *not* work in pure NumPy:
+- Algorithmic short-circuit (early_stop): dispatch overhead.
+- Single-query thread parallelism: BLAS pool already parallel.
+- Quantised / SWAR LUT: dispatch-bound, not memory-bound.
+
+Reaching < 1 ms / query at the 0.91-recall operating point requires
+either dropping to a compiled inner loop (Numba / Cython / C) or
+reducing M significantly (which costs recall).  This is the v0.5
+ceiling, and the v0.6 roadmap.
