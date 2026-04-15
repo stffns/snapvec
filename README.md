@@ -7,7 +7,7 @@
 - **`SnapIndex`** — *training-free scalar*.  Implements [TurboQuant](https://arxiv.org/abs/2504.19874) (randomized Hadamard transform + Lloyd-Max scalar quantization).  Works out-of-the-box on any vector distribution, no calibration or corpus sample required.  **~6× / ~8× / ~12× compression at 4 / 3 / 2 bits** with **>0.92 recall@10** on real embeddings.
 - **`ResidualSnapIndex`** — *training-free, two-stage scalar*.  Cascades coarse + residual Lloyd-Max quantization to reach operating points `SnapIndex` alone cannot (5 / 6 / 7 bits/coord with recall up to 0.96), and offers a coarse-pass + rerank search mode that converges to full-reconstruction recall at O(`rerank_M`) candidates instead of O(N) (e.g. `rerank_M = 100` already saturates on the tested corpora).
 - **`PQSnapIndex`** — *train-once product quantization*.  Learns per-subspace k-means codebooks; delivers **+15–18 pp recall@10** over `SnapIndex` at matched bytes/vec on modern LLM embeddings, and opens ultra-compressed modes (16 / 32 / 64 B/vec) that scalar quantization cannot reach.  Cost is one offline `fit(sample)` call.
-- **`IVFPQSnapIndex`** — *sub-linear search at scale*.  Adds an inverted-file coarse partition on top of residual PQ.  Visits only `nprobe / nlist` of the corpus per query: **~9× faster than `PQSnapIndex` full-scan at -0.6 pp recall**, or actually exceeds full-scan recall when `nprobe ≥ nlist / 8` because per-cluster residuals have smaller variance than globally-centred vectors.
+- **`IVFPQSnapIndex`** — *sub-linear search at scale*, with an optional **float32 rerank pass** (v0.6) that breaks the PQ recall ceiling.  Base path is an inverted-file coarse partition on top of residual PQ, visiting only `nprobe / nlist` of the corpus per query.  With `keep_full_precision=True` + `rerank_candidates=100`, IVF-PQ reaches **recall@10 = 0.994 at ~4.6 ms / query** on BGE-small / FIQA — past the PQ-only 0.929 ceiling, at <1 % latency overhead over the IVF-PQ work.
 
 ```
 pip install snapvec
@@ -117,6 +117,39 @@ results = idx.search(query.astype(np.float32), k=10, nprobe=16)
 idx.save("my_index.snpi")
 idx2 = IVFPQSnapIndex.load("my_index.snpi")
 ```
+
+#### Float32 rerank for recall above the PQ ceiling *(v0.6)*
+
+The IVF-PQ pass has a recall ceiling set by the per-subspace codebook capacity — at `M = 192, K = 256` that ceiling is **0.929** on BGE-small / FIQA, regardless of `nprobe`.  Past that, no amount of probing can recover vectors the PQ decoder couldn't distinguish.
+
+Opt in to a float32 rerank that recovers the missing recall:
+
+```python
+idx = IVFPQSnapIndex(
+    dim=384, nlist=512, M=192, K=256, normalized=True,
+    keep_full_precision=True,       # +dim × 4 bytes / vec (cached originals)
+)
+idx.fit(training_vectors)
+idx.add_batch(ids, corpus)
+
+# IVF-PQ picks top-100 candidates, then float32 reranks → top-10.
+hits = idx.search(query, k=10, nprobe=32, rerank_candidates=100)
+```
+
+On BGE-small / FIQA (N = 57 638, `nlist=512`, `M=192`, `K=256`, mean of 300 queries):
+
+| `nprobe` | PQ only recall | PQ only ms | + `rerank_candidates=100` recall | + rerank ms |
+|---:|---:|---:|---:|---:|
+| 16 | 0.842 | 0.87 | **0.880** | 0.89 |
+| 32 | 0.893 | 1.49 | **0.943** | 1.38 |
+| 64 | 0.917 | 2.52 | **0.977** | 2.55 |
+| 128 | 0.928 | 4.55 | **0.994** | 4.59 |
+
+Rerank cost is a single `(rerank_candidates, dim) @ (dim,)` matmul (~38k ops at N = 100 candidates).  **Latency overhead is <1 %** of the IVF-PQ pass.  `rerank_candidates = 100` already saturates the lift — going to 200 doesn't move the number.
+
+Trade-off: the float32 cache adds `dim × 4 bytes` per vector.  At `d = 384` that's +1.5 KB / vec on top of the `M = 192` codes, ~9× total storage.  Opt-in; default `keep_full_precision=False` preserves the v0.5 storage footprint exactly.
+
+---
 
 On BGE-small (N = 20 000, `M=192`, `K=256`, `nlist=256`) vs. `PQSnapIndex` full-scan (recall 0.937, 5.82 ms/q):
 
