@@ -443,12 +443,17 @@ def test_fp16_cache_recall_matches_fp32_within_noise() -> None:
         hits_fp32 = idx.search(queries[0], k=10, nprobe=8, rerank_candidates=40)
     finally:
         idx._full_precision = original_fp16
-    scores_differ = any(
-        abs(a[1] - b[1]) > 1e-8
+    # Compare both id ordering and scores: if precision loss reshuffles
+    # the ranking, the per-rank ids will diverge even when the raw
+    # scores at those ranks happen to be near-identical — so we treat
+    # either a score delta or an id delta as evidence that the test is
+    # exercising fp16 vs fp32 rather than fp16 vs fp16.
+    results_differ = any(
+        a[0] != b[0] or abs(a[1] - b[1]) > 1e-8
         for a, b in zip(hits_fp16, hits_fp32)
     )
-    assert scores_differ, (
-        "fp16 and fp32 produced byte-identical scores — test regressed "
+    assert results_differ, (
+        "fp16 and fp32 produced byte-identical results — test regressed "
         "back to the vacuous version it was meant to replace"
     )
 

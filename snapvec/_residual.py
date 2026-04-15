@@ -33,6 +33,7 @@ from numpy.typing import NDArray
 
 from ._codebooks import get_codebook
 from ._file_format import save_with_checksum_atomic, verify_checksum
+from ._freezable import FreezableIndex
 from ._rotation import padded_dim, rht
 
 
@@ -64,7 +65,7 @@ def _sigma_r(b1: int) -> float:
     return float(np.sqrt(_LLOYD_MSE[b1]))
 
 
-class ResidualSnapIndex:
+class ResidualSnapIndex(FreezableIndex):
     """Two-stage Lloyd-Max TurboQuant index.
 
     Parameters
@@ -122,11 +123,13 @@ class ResidualSnapIndex:
     # ──────────────────────────────────────────────────────────────── #
 
     def add(self, id: Any, vector: NDArray[np.float32]) -> None:
+        self._check_not_frozen("add")
         self.add_batch([id], np.asarray(vector, dtype=np.float32)[None, :])
 
     def add_batch(
         self, ids: list[Any], vectors: NDArray[np.float32]
     ) -> None:
+        self._check_not_frozen("add_batch")
         arr = np.asarray(vectors, dtype=np.float32)
         if arr.ndim != 2 or arr.shape[1] != self.dim:
             raise ValueError(
