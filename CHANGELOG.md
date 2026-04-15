@@ -6,6 +6,25 @@ the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Planned release sequence
+
+The v0.5.0 entry below lists "v0.6 roadmap" as a single bucket; that
+turned into a deliberate two-release split:
+
+- **v0.6.0 — `pq_rerank=True`** to break the recall ceiling at
+  `M = 256, K = 256` (full-scan PQ tops out at 0.929; rerank with
+  the original float32 vectors lifts top-k recall toward 0.97+ at
+  the cost of ~1 ms additional latency and an opt-in ~4× storage
+  hit via `keep_full_precision=True`).
+- **v0.7.0 — `snapvec[fast]` accelerator** for the search hot path.
+  Numba is the prototyping path; Rust + PyO3 + maturin is the
+  long-term distribution path.  See
+  [`docs/blog/02-fast-extension.md`](docs/blog/02-fast-extension.md)
+  for the decision matrix kept up to date as the work progresses.
+
+Bit-packed PQ codes for `K < 256` and `filter_ids` on PQ / IVF-PQ
+remain on the roadmap, scheduled per demand after 0.7.
+
 ## [0.5.0] — 2026-04-15
 
 Headline: an evidence-driven perf sprint for `IVFPQSnapIndex`.
