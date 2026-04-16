@@ -78,8 +78,8 @@ Four operating points, all sub-millisecond at N=57K:
 
 | Profile        | nprobe | Recall | us/query |
 |----------------|-------:|-------:|---------:|
-| Interactive    |     16 |  0.883 |      304 |
-| Balanced       |     32 |  0.944 |      369 |
+| Fastest        |     16 |  0.883 |      304 |
+| Interactive    |     32 |  0.944 |      369 |
 | High precision |     64 |  0.977 |      441 |
 | Near-exact     |    128 |  0.992 |      635 |
 

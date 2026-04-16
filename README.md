@@ -135,8 +135,8 @@ On BGE-small / FIQA (N=57,638, `nlist=512`, `M=192`, `K=256`, 500 queries, v0.9.
 
 | Profile | `nprobe` | Recall@10 | us/query | Use case |
 |---------|---:|---:|---:|---|
-| **Interactive** | 16 | 0.883 | 304 | RAG chat, autocomplete |
-| **Balanced** | 32 | 0.944 | 369 | General production |
+| **Fastest** | 16 | 0.883 | 304 | Latency-critical, recall <90% acceptable |
+| **Interactive** | 32 | 0.944 | 369 | RAG chat, autocomplete (default recommendation) |
 | **High precision** | 64 | 0.977 | 441 | Apps where recall matters |
 | **Near-exact** | 128 | 0.992 | 635 | When you need to be sure |
 
@@ -181,7 +181,9 @@ v0.9.0 adds Cython+OpenMP compiled ADC kernels. Latency comparison on the same F
 | 64 | 2,550 us | **441 us** | **5.8x** |
 | 128 | 4,590 us | **635 us** | **7.2x** |
 
-snapvec reaches recall 0.98 at sub-ms latency with a NumPy-only runtime dependency. Comparable recall to libraries using SIMD popcount (e.g. RaBitQ) or GPU-accelerated codebooks (FAISS-GPU), with the distribution simplicity of a pure-Python package with a compiled hot path.
+snapvec reaches recall 0.98 at sub-ms latency on BEIR FiQA (BGE-small, N=57K) with a NumPy-only runtime dependency. This is in the same recall range as libraries that depend on SIMD popcount intrinsics (RaBitQ) or GPU-accelerated codebooks (FAISS-GPU), at the cost of a single compiled wheel -- a trade-off of distribution simplicity vs asymptotic optimality.
+
+The Cython+OpenMP kernel matches Numba-parallel performance without the 143MB LLVM runtime, so Numba was evaluated and dropped from the dependency graph. snapvec's only runtime dependency is numpy.
 
 ### Sizing `nlist` and the training set
 
@@ -258,9 +260,9 @@ optimal scalar quantizer for N(0,1).
 > *TurboQuant: Online Vector Quantization with Near-optimal Distortion Rate.*
 > ICLR 2026 — [arXiv:2504.19874](https://arxiv.org/abs/2504.19874)
 >
-> `snapvec` is an independent, pure-NumPy implementation of the algorithm
-> described in that paper. If you use snapvec in academic work, please
-> cite the TurboQuant paper.
+> `snapvec` is an independent implementation of the algorithm described
+> in that paper, with Cython-compiled hot paths for production latency.
+> If you use snapvec in academic work, please cite the TurboQuant paper.
 
 ---
 
@@ -554,7 +556,7 @@ named after its two core operations.
 
 Key contributions of this implementation over the reference:
 
-- **No scipy** — codebooks hardcoded, numpy is the only runtime dependency
+- **No scipy** -- codebooks hardcoded, numpy is the only runtime dependency. Cython kernels compile at install time
 - **Batch WHT** — single O(n·d·log d) call for bulk inserts (~50x faster than loop)
 - **Float16 cache** — centroid expansions in half precision, ~2x faster matmul
 - **Packed RAM indices** — 2/4-bit indices stored bit-packed in RAM (2× less memory),
@@ -570,63 +572,48 @@ Key contributions of this implementation over the reference:
 
 ## Roadmap
 
-The current implementation comfortably hits the 10–20 ms interactive budget
-for N ≤ 200 k, d ∈ {384, 768}, with p50 warm-query latency of ~5 ms at
-N=100 k, d=384. The float16 centroid cache carries ~77% of that time as a
-BLAS-bound `gemv`; the remaining 23% is Python glue (RHT, normalization,
-argpartition, result assembly).
-
-Future work is scoped around this measured profile — we don't optimize
-what's already fast.
-
 ### Pure-Python improvements (no new dependencies)
 
-- **Quantized norms on disk** — store per-vector norms as uint8 with a
+- **Quantized norms on disk** -- store per-vector norms as uint8 with a
   (min, max) header. Saves 3 bytes/vec on disk with <0.1% precision loss.
-- **Typed ID storage** — persist integer IDs as fixed-width uint32/uint64
-  instead of UTF-8 strings when all IDs are numeric. Saves ~3 bytes/vec
-  on disk for sequential integer IDs.
-- **Positional-ID fast path** — when IDs are `0..N-1`, skip `_ids` list
-  and `_id_to_pos` dict entirely; position is the ID. Saves ~23 bytes/vec
-  of Python object overhead.
+- **Typed ID storage** -- persist integer IDs as fixed-width uint32/uint64
+  instead of UTF-8 strings when all IDs are numeric.
+- **Positional-ID fast path** -- when IDs are `0..N-1`, skip `_ids` list
+  and `_id_to_pos` dict entirely; position is the ID.
+- **API parity** -- `filter_ids` for PQSnapIndex and ResidualSnapIndex
+  (currently only SnapIndex and IVFPQSnapIndex support it).
+
+### Future directions
+
+- **Batch RHT + quantization** -- Cython FWHT + `searchsorted` for
+  `add_batch`. Target: `add_batch(100k, d=384)` 2.5s -> ~200ms.
+  Lowest priority -- indexing is typically amortized offline.
+- **OpenMP tuning** -- the current parallel threshold (n >= 2000) and
+  schedule (static) were chosen empirically on Apple Silicon. Linux
+  and many-core x86 may benefit from dynamic scheduling or different
+  thresholds.
 
 _Previously planned and now shipped:_
-_Tight 3-bit packing (v0.3.0); vectorized FWHT (v0.3.0, ~25× faster per
-query in isolation, ~10% E2E)._
-
-### Hybrid Python + Rust core (opt-in accelerator)
-
-The following phases would ship as an optional `snapvec-core` wheel. The
-pure-Python path remains fully functional — Rust is detected at import
-time and used automatically when available.
-
-**Phase 1 — Cold-start / cache build (highest ROI)**
-  - Move centroid expansion + `float16` conversion to Rust with SIMD.
-  - Target: cold first-query 150 ms → ~20 ms on N=100 k, d=384.
-  - Smallest API surface; trivial Python fallback.
-
-**Phase 2 — LUT-based scan (eliminates the float16 cache)**
-  - Implement PQ-style Asymmetric Distance Computation: per-query LUT
-    (16 entries × pdim) + SIMD gather over packed indices.
-  - Target: warm query 5 ms → ~1.5–2 ms; cache RAM: 102 MB → 0.
-  - Enables N > 500 k with flat RAM growth.
-
-**Phase 3 — Batch RHT + quantization**
-  - Rust FWHT + `searchsorted` for `add_batch`.
-  - Target: `add_batch(100k, d=384)` 2.5 s → ~200 ms.
-  - Lowest priority — indexing is typically amortized offline.
+_Tight 3-bit packing (v0.3.0). Vectorized FWHT (v0.3.0). Compiled
+ADC kernels (v0.9.0 via Cython+OpenMP -- originally scoped as Rust
+Phase 1-2, delivered with equivalent performance and simpler build)._
 
 ### Non-goals
 
-- **Trained codebooks (PQ / OPQ / RaBitQ-trained)**. Keeps the "no training
-  required" guarantee; the data-agnostic Lloyd-Max tables make snapvec
-  safe to use without a representative training sample.
+- **Rust / native extensions beyond Cython**. The v0.9.0 Cython+OpenMP
+  kernels match the performance targets originally scoped for a Rust
+  accelerator, at the cost of one compiled wheel build. Adding a second
+  native backend would duplicate maintenance without clear user benefit.
+- **Trained codebooks (PQ / OPQ / RaBitQ-trained)** for SnapIndex. Keeps
+  the "no training required" guarantee; the data-agnostic Lloyd-Max
+  tables make SnapIndex safe to use without a representative sample.
+  (PQSnapIndex and IVFPQSnapIndex do use trained codebooks by design.)
 - **Graph indices (HNSW / NSG)**. Different trade-off space; snapvec
-  targets flat indices where compression and predictable latency matter
-  more than sub-linear scan.
-- **GPU acceleration**. The cache-matmul path is memory-bound on modern
-  CPUs; GPU would help only at very large N where network/transfer cost
-  already dominates.
+  targets flat and inverted-file indices where compression and
+  predictable latency matter more than sub-linear graph traversal.
+- **GPU acceleration**. The compiled ADC path is compute-bound on CPU
+  at current scales; GPU would help only at very large N where
+  network/transfer cost already dominates.
 
 ---
 
@@ -635,11 +622,12 @@ time and used automatically when available.
 See [`CHANGELOG.md`](./CHANGELOG.md) for the per-release history. Recent
 highlights:
 
-- **v0.3.0** — Tight 3-bit packing (5.9× → 7.8× compression for 3-bit),
-  vectorised FWHT (~24× faster single-query RHT), file format v3 with
-  transparent v1/v2 backward-compat.
-- **v0.2.0** — RAM-packed indices for 2/4-bit (idle RAM cut in half),
-  `normalized=True` flag, measured-accurate compression docs.
+- **v0.9.0** -- Cython+OpenMP compiled ADC kernels. 5.8x faster at recall 0.977 on FIQA. Zero extra runtime dependencies.
+- **v0.8.0** -- Thread-safe search via `freeze()`, `filter_ids` for IVFPQSnapIndex.
+- **v0.7.0** -- CRC32 trailers on all file formats, fp16 rerank cache (half storage).
+- **v0.6.0** -- Float32 rerank pass breaks the PQ recall ceiling (0.929 -> 0.994).
+- **v0.5.0** -- IVFPQSnapIndex with sub-linear search, 12x faster build at N=1M.
+- **v0.3.0** -- Tight 3-bit packing (7.8x compression), vectorised FWHT.
 
 ## Installation
 
@@ -647,16 +635,21 @@ highlights:
 pip install snapvec
 ```
 
-**Requirements:** Python >= 3.10, NumPy >= 1.24.  No other runtime dependencies.
+**Requirements:** Python >= 3.10, NumPy >= 1.24, C compiler (for Cython extension).
+No other runtime dependencies.
 
 For development:
 
 ```bash
 git clone https://github.com/stffns/snapvec
 cd snapvec
-pip install -e .
+pip install -e ".[dev]"
+python setup.py build_ext --inplace   # compile Cython kernels
 pytest tests/ -v
 ```
+
+On macOS, `brew install libomp` enables OpenMP parallel scoring.
+On Linux, OpenMP support is typically available via gcc out of the box.
 
 ---
 
