@@ -89,3 +89,98 @@ def adc_colmajor(
             _adc_colmajor_numba(lut, codes, scores)
     else:
         _adc_colmajor_numpy(lut, codes, scores)
+
+
+# ── Fused gather + ADC kernel ──────────────────────────────────────
+
+def _fused_gather_adc_numpy(
+    all_codes: NDArray[np.uint8],
+    row_idx: NDArray[np.int64],
+    coarse_offsets: NDArray[np.float32],
+    lut: NDArray[np.float32],
+    scores: NDArray[np.float32],
+) -> None:
+    """Pure-NumPy fallback: gather into temp buffer then ADC loop."""
+    M = all_codes.shape[0]
+    n = len(row_idx)
+    cat = all_codes[:, row_idx]
+    for i in range(n):
+        scores[i] = coarse_offsets[i]
+    for j in range(M):
+        scores += lut[j][cat[j]]
+
+
+if _HAS_NUMBA:
+    @nb.njit(cache=True, boundscheck=False)
+    def _fused_gather_adc_numba(
+        all_codes: NDArray[np.uint8],
+        row_idx: NDArray[np.int64],
+        coarse_offsets: NDArray[np.float32],
+        lut: NDArray[np.float32],
+        scores: NDArray[np.float32],
+    ) -> None:
+        """Fused gather+ADC: serial, safe inside ThreadPoolExecutor."""
+        M = all_codes.shape[0]
+        n = len(row_idx)
+        for i in range(n):
+            r = row_idx[i]
+            acc = coarse_offsets[i]
+            for j in range(M):
+                acc += lut[j, all_codes[j, r]]
+            scores[i] = acc
+
+    @nb.njit(cache=True, boundscheck=False, parallel=True)
+    def _fused_gather_adc_numba_par(
+        all_codes: NDArray[np.uint8],
+        row_idx: NDArray[np.int64],
+        coarse_offsets: NDArray[np.float32],
+        lut: NDArray[np.float32],
+        scores: NDArray[np.float32],
+    ) -> None:
+        """Fused gather+ADC: parallel via prange."""
+        M = all_codes.shape[0]
+        n = len(row_idx)
+        for i in nb.prange(n):
+            r = row_idx[i]
+            acc = coarse_offsets[i]
+            for j in range(M):
+                acc += lut[j, all_codes[j, r]]
+            scores[i] = acc
+
+
+def fused_gather_adc(
+    all_codes: NDArray[np.uint8],
+    row_idx: NDArray[np.int64],
+    coarse_offsets: NDArray[np.float32],
+    lut: NDArray[np.float32],
+    scores: NDArray[np.float32],
+    parallel: bool = True,
+) -> None:
+    """Score candidates by reading codes directly (no intermediate buffer).
+
+    Parameters
+    ----------
+    all_codes : (M, N) uint8
+        Full code storage (column-major).
+    row_idx : (n,) int64
+        Indices into all_codes axis=1 for each candidate.
+    coarse_offsets : (n,) float32
+        Per-candidate coarse dot-product offset.
+    lut : (M, K) float32
+        Per-subspace lookup table.
+    scores : (n,) float32
+        Output scores.
+    parallel : bool
+        Use multi-threaded kernel. Set False when called from
+        within a ThreadPoolExecutor to avoid deadlocks.
+    """
+    if _HAS_NUMBA:
+        if parallel and len(row_idx) >= 2000:
+            _fused_gather_adc_numba_par(all_codes, row_idx,
+                                        coarse_offsets, lut, scores)
+        else:
+            _fused_gather_adc_numba(all_codes, row_idx,
+                                    coarse_offsets, lut, scores)
+    else:
+        _fused_gather_adc_numpy(all_codes, row_idx, coarse_offsets,
+                                lut, scores)
