@@ -315,4 +315,59 @@ at or near the pure-NumPy optimum:
 - **Top-k / coarse probe / preprocess:** <4% combined, not worth
   optimising.
 
+### Pipeline structure analysis
+
+The IVF-PQ search pipeline processes a query in six stages:
+
+```
+Query (dim=384)
+  |
+  v
+1. PREPROCESS (6us, 0.2%)
+   normalize -> pad -> RHT rotation -> q_pre
+  |
+  v
+2. COARSE PROBE (19us, 0.6%)
+   q_pre @ centroids.T -> rank -> argpartition top-nprobe
+  |
+  v
+3. LUT BUILD (25us, 0.8%)
+   codebooks (M,K,d_sub) @ q_split -> lut (M,K)
+   precomputes all 49K possible dot products
+  |
+  v
+4. GATHER (676us, 21.6%)
+   copy codes from nprobe cluster slices into one (M, total) buffer
+  |
+  v
+5. ADC SCORING (2315us, 73.9%)
+   for j in M: scores += lut[j][cat[j]]
+   in-place accumulator, 14KB working set, L1-resident
+  |
+  v
+6. TOP-K (84us, 2.7%)
+   argpartition + argsort -> [(id, score), ...]
+```
+
+The pipeline order is structurally optimal. The key decision is
+gather-then-score vs score-per-cluster:
+
+- **Current (gather-then-score):** nprobe + M = 32 + 192 = 224
+  Python dispatches. Gather costs 676us.
+- **Alternative (score-per-cluster):** nprobe x M = 32 x 192 = 6,144
+  dispatches. At ~2us each, adds ~12ms of overhead.
+
+Gather pays 676us once to reduce dispatches by 27x. The 676us is
+pure memcpy (contiguous cluster slices), making it very cheap.
+
+Other structural decisions that are already optimal:
+- Full coarse matmul (64 clusters) is faster than cherry-picking 32
+  because BLAS batch efficiency outweighs the wasted dot products.
+- Full LUT (M x K = 49K entries) precomputes all possible subspace
+  dot products so ADC is pure table lookups, not real dot products.
+- Cluster-contiguous storage makes gather a sequence of memcpys.
+- search_batch fuses LUT build across B queries in one matmul.
+
+No redundant work, no reordering that improves throughput.
+
 The path to < 1ms/query remains compiled code (Numba/Cython/Rust).
