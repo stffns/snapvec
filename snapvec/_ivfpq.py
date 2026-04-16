@@ -40,6 +40,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from ._fast import adc_colmajor
 from ._file_format import save_with_checksum_atomic, verify_checksum
 from ._freezable import FreezableIndex
 from ._kmeans import assign_l2, kmeans_mse, probe_scores_l2_monotone
@@ -711,8 +712,7 @@ class IVFPQSnapIndex(FreezableIndex):
             scores[cursor : cursor + n_c] = coarse_dot[c]
             cursor += n_c
 
-        for j in range(self.M):
-            scores += lut[j][cat[j]]
+        adc_colmajor(lut, cat, scores, parallel=True)
 
         if not self.normalized:
             scores *= self._norms[row_idx]

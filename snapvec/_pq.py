@@ -33,6 +33,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from ._fast import adc_colmajor
 from ._file_format import save_with_checksum_atomic, verify_checksum
 from ._freezable import FreezableIndex
 from ._kmeans import kmeans_mse
@@ -311,8 +312,7 @@ class PQSnapIndex(FreezableIndex):
 
         # Score[i] = Σ_j LUT[j, codes[j, i]]
         scores = np.zeros(self._codes.shape[1], dtype=np.float32)
-        for j in range(self.M):
-            scores += lut[j][self._codes[j]]
+        adc_colmajor(lut, self._codes, scores, parallel=True)
 
         if not self.normalized:
             scores = scores * self._norms

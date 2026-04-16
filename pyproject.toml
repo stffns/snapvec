@@ -71,6 +71,7 @@ module = "tests.*"
 disallow_untyped_defs = false   # relaxed for test files
 
 [project.optional-dependencies]
+fast = ["numba>=0.59.0"]
 dev = [
     "pytest",
     "pytest-cov",
