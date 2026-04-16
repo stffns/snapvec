@@ -17,3 +17,6 @@ dist/
 # experiment caches and harness state — large binary, not source of truth
 experiments/.cache_*.npy
 .claude/scheduled_tasks.lock
+*.so
+snapvec/_fast.c
+build/

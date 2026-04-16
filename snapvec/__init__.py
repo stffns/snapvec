@@ -1,7 +1,7 @@
 """snapvec — compressed vector index for fast ANN search.
 
 Fast approximate nearest-neighbor search via randomized Hadamard transform
-and optimal Gaussian scalar quantization.  Pure NumPy, no heavy dependencies.
+and optimal Gaussian scalar quantization.  NumPy + Cython compiled kernels.
 
     >>> from snapvec import SnapIndex
     >>> idx = SnapIndex(dim=384, bits=4)
@@ -19,7 +19,7 @@ from ._pq import PQSnapIndex
 from ._residual import ResidualSnapIndex
 from ._rotation import padded_dim, rht
 
-__version__ = "0.8.1"
+__version__ = "0.9.0"
 __all__ = [
     "SnapIndex",
     "PQSnapIndex",

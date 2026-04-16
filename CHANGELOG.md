@@ -6,6 +6,112 @@ the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.0] -- 2026-04-16
+
+Headline: **5.8x faster search via Cython compiled kernels,
+recall 0.977 at 441us on FIQA -- zero extra runtime dependencies.**
+
+The v0.8.1 pure-NumPy sprint proved that the ADC scoring loop (74-97%
+of search time) is dispatch-bound at M=192: NumPy's ~2us per-call
+overhead x 192 subspaces = ~400us floor that no vectorisation trick
+can break. This release compiles the hot path to native code via
+Cython+OpenMP, eliminating the dispatch overhead entirely.
+
+The 0.977 recall at nprobe=64+rerank reproduces the v0.6.0
+measurement exactly, across three releases with non-trivial
+algorithmic changes (column-major layout, batched matmul LUT,
+compiled kernel). Same config, same data, same number.
+
+### Added
+
+- **Cython compiled ADC kernel** (`snapvec/_fast.pyx`) with OpenMP
+  parallel scoring via `prange`. Two kernels:
+  - `adc_colmajor`: fused subspace scoring loop (replaces the M=192
+    Python dispatch loop). Serial below 2000 candidates, parallel
+    above.
+  - `fused_gather_adc`: reads codes directly from `_codes` via
+    `row_idx` indirection, eliminating the intermediate `(M, total)`
+    gather buffer. Saves both the memcpy and the allocation.
+
+- **`setup.py`** with OpenMP auto-detection per platform (macOS via
+  Homebrew libomp, Linux via gcc `-fopenmp`, Windows via MSVC
+  `/openmp`). Falls back to serial-only compilation if OpenMP is
+  not available.
+
+### Changed
+
+- **Build backend switched from hatchling to setuptools** to support
+  Cython extension compilation.
+
+- **numba removed** -- Cython produces identical performance (same
+  LLVM backend on macOS) without the 143MB JIT runtime, cold-start
+  penalty, or Python version lag. `snapvec` only depends on numpy
+  at runtime.
+
+- **`pyproject.toml` description** updated to reflect "NumPy + Cython
+  compiled kernels" (was "Pure NumPy, no heavy dependencies").
+
+### Performance
+
+ADC kernel microbench (M=192, K=256):
+
+| n_cand | NumPy (v0.8.1) | Cython serial | Cython parallel |
+|--------|---------------:|--------------:|----------------:|
+| 500    | 199 us         | 42 us (4.7x)  | 40 us (5.0x)    |
+| 3,500  | 695 us         | 271 us (2.6x) | 187 us (3.7x)   |
+| 10,000 | 2,112 us       | 788 us (2.7x) | 253 us (8.3x)   |
+| 50,000 | 8,847 us       | 4,604 us      | 946 us (9.4x)   |
+
+End-to-end on BGE-small / FIQA (N=57,638, nlist=512, M=192, K=256,
+500 queries):
+
+| nprobe + rerank | v0.6.0 | v0.9.0 | Speedup | Recall |
+|-----------------|-------:|-------:|--------:|-------:|
+| 32              | 1,380  | **369 us** | **3.7x** | 0.944 |
+| 64              | 2,550  | **441 us** | **5.8x** | 0.977 |
+| 128             | 4,590  | **635 us** | **7.2x** | 0.992 |
+
+PQ full-scan: recall 0.915 at 1,529 us. IVF-PQ nprobe=64 + rerank
+is 3.5x faster at higher recall -- strictly superior on both axes.
+
+Four operating points, all sub-millisecond at N=57K:
+
+| Profile        | nprobe | Recall | us/query |
+|----------------|-------:|-------:|---------:|
+| Fastest        |     16 |  0.883 |      304 |
+| Interactive    |     32 |  0.944 |      369 |
+| High precision |     64 |  0.977 |      441 |
+| Near-exact     |    128 |  0.992 |      635 |
+
+### What was tried and rejected
+
+Full experimentation log in `experiments/PERF_NOTES.md`:
+
+- **Vectorised ADC** (take_along_axis, chunked, fancy indexing):
+  0.4-0.9x. Materialising (M, n_cand) intermediate kills L1 cache
+  locality that the per-subspace loop preserves.
+- **Sparse CSR matvec**: 3.3x without build cost, 0.2x with. CSR
+  construction dominates.
+- **Gather vectorisation** (np.concatenate, fancy indexing, cumsum):
+  all slower. Contiguous-slice memcpy beats scattered access.
+- **Numba gather kernel**: 0.1x. Element-by-element Numba loop
+  can't beat NumPy's bulk memcpy for contiguous slices.
+- **Numba** was the initial compiled backend. Matched Cython
+  performance exactly but adds 143MB runtime (numba + llvmlite),
+  2-3s JIT cold start, Python version lag, and serverless/container
+  friction. Replaced by Cython for zero runtime cost.
+
+### Pipeline structure (confirmed optimal)
+
+```
+Query -> Preprocess (6us) -> Coarse probe (19us) -> LUT build (25us)
+      -> Gather row_idx (22us) -> Fused ADC (187us) -> Top-k (84us)
+```
+
+Gather-then-score (224 dispatches) beats score-per-cluster (6,144
+dispatches) by 27x. Every pipeline stage profiled and tested against
+alternatives.
+
 ## [0.8.1] -- 2026-04-16
 
 Performance-only release: push pure-NumPy search to its ceiling.

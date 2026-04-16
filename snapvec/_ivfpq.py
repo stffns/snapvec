@@ -40,6 +40,10 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+try:
+    from ._fast import fused_gather_adc
+except ImportError:
+    from ._fast_fallback import fused_gather_adc  # type: ignore[assignment]
 from ._file_format import save_with_checksum_atomic, verify_checksum
 from ._freezable import FreezableIndex
 from ._kmeans import assign_l2, kmeans_mse, probe_scores_l2_monotone
@@ -620,6 +624,7 @@ class IVFPQSnapIndex(FreezableIndex):
         k: int,
         rerank_candidates: int,
         filter_rows: NDArray[np.int64] | None = None,
+        _parallel: bool = True,
     ) -> list[tuple[Any, float]]:
         """IVF-PQ → top-N candidates → float32 rerank → top-k.
 
@@ -631,7 +636,9 @@ class IVFPQSnapIndex(FreezableIndex):
         default path is that we then look up ``_full_precision`` for
         the winners and re-score them exactly.
         """
-        pq_scores, row_idx = self._gather_pq_scores(probe, coarse_dot, lut)
+        pq_scores, row_idx = self._gather_pq_scores(
+            probe, coarse_dot, lut, _parallel=_parallel,
+        )
         if filter_rows is not None and len(row_idx) > 0:
             # Both arrays are unique (row_idx is a concat of contiguous
             # per-cluster arange() blocks, filter_rows was made unique
@@ -671,6 +678,7 @@ class IVFPQSnapIndex(FreezableIndex):
         probe: NDArray[np.int64],
         coarse_dot: NDArray[np.float32],
         lut: NDArray[np.float32],
+        _parallel: bool = True,
     ) -> tuple[NDArray[np.float32], NDArray[np.int64]]:
         """Gather probed clusters → PQ-ADC scores + internal row ids.
 
@@ -694,25 +702,21 @@ class IVFPQSnapIndex(FreezableIndex):
                 np.empty(0, dtype=np.int64),
             )
 
-        # Contiguous gather: each probed cluster is a contiguous slice
-        # of _codes along axis=1 (column-major (M, n) layout).  Build
-        # (M, total) cat by concatenating the M-major slices once, so
-        # the per-subspace gather stays contiguous in memory.
-        cat = np.empty((self.M, total), dtype=np.uint8)
         row_idx = np.empty(total, dtype=np.int64)
-        scores = np.empty(total, dtype=np.float32)
+        coarse_offsets = np.empty(total, dtype=np.float32)
         cursor = 0
         for s, e, c in zip(starts.tolist(), ends.tolist(), probe.tolist()):
             n_c = e - s
             if n_c == 0:
                 continue
-            cat[:, cursor : cursor + n_c] = self._codes[:, s:e]
             row_idx[cursor : cursor + n_c] = np.arange(s, e, dtype=np.int64)
-            scores[cursor : cursor + n_c] = coarse_dot[c]
+            coarse_offsets[cursor : cursor + n_c] = coarse_dot[c]
             cursor += n_c
 
-        for j in range(self.M):
-            scores += lut[j][cat[j]]
+        scores = np.empty(total, dtype=np.float32)
+        assert int(row_idx.max()) < self._codes.shape[1] if total > 0 else True
+        fused_gather_adc(self._codes, row_idx, coarse_offsets,
+                         lut, scores, parallel=_parallel)
 
         if not self.normalized:
             scores *= self._norms[row_idx]
@@ -726,12 +730,15 @@ class IVFPQSnapIndex(FreezableIndex):
         lut: NDArray[np.float32],
         k: int,
         filter_rows: NDArray[np.int64] | None = None,
+        _parallel: bool = True,
     ) -> list[tuple[Any, float]]:
         """Gather → ADC sum → top-k for a single query.
 
         Hot path; used by both ``search()`` and ``search_batch()``.
         """
-        scores, row_idx = self._gather_pq_scores(probe, coarse_dot, lut)
+        scores, row_idx = self._gather_pq_scores(
+            probe, coarse_dot, lut, _parallel=_parallel,
+        )
         if filter_rows is not None and len(row_idx) > 0:
             keep = np.isin(row_idx, filter_rows, assume_unique=True)
             scores = scores[keep]
@@ -874,6 +881,7 @@ class IVFPQSnapIndex(FreezableIndex):
                 return
             results[b] = self._score_one(
                 probes[b], coarse_dot_all[b], lut_batch[b], k, filter_rows,
+                _parallel=False,
             )
 
         if num_threads > 1 and B >= num_threads:
