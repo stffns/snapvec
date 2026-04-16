@@ -14,11 +14,12 @@ rng = np.random.default_rng(42)
 DIM = 384
 M = 192
 K = 256
-NLIST = 64
+NLIST = 256
 N_VALUES = [10_000, 20_000, 50_000]
 N_QUERIES = 200
 K_SEARCH = 10
-NPROBES = [4, 8, 16, 32, 64, 128]
+NPROBES = [8, 16, 32, 64, 128]
+N_TRAIN = 5000
 
 
 def brute_force_topk(corpus, queries, k):
@@ -52,7 +53,7 @@ def bench_pq(N, corpus, queries, exact_results):
     # Build
     pq = PQSnapIndex(dim=DIM, M=M, K=K, normalized=True)
     t0 = time.perf_counter()
-    pq.fit(corpus[:min(2000, N)])
+    pq.fit(corpus[:min(N_TRAIN, N)])
     fit_ms = (time.perf_counter() - t0) * 1e3
 
     t0 = time.perf_counter()
@@ -94,7 +95,7 @@ def bench_ivfpq(N, corpus, queries, exact_results):
         normalized=True, keep_full_precision=True,
     )
     t0 = time.perf_counter()
-    ivf.fit(corpus[:min(2000, N)])
+    ivf.fit(corpus[:min(N_TRAIN, N)])
     fit_ms = (time.perf_counter() - t0) * 1e3
 
     t0 = time.perf_counter()

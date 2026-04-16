@@ -57,12 +57,17 @@ ADC kernel microbench (M=192, K=256):
 | 10,000 | 2,112 us       | 788 us (2.7x) | 253 us (8.3x)   |
 | 50,000 | 8,847 us       | 4,604 us      | 946 us (9.4x)   |
 
-End-to-end search (N=20K, dim=384, M=192, K=256):
+End-to-end search (N=20K, dim=384, M=192, K=256, nlist=256):
 
 | Index          | v0.8.0  | v0.8.1 (NumPy) | v0.9.0 (Cython) | Total |
 |----------------|--------:|---------------:|----------------:|------:|
 | PQSnapIndex    | 5,850   | 3,980          | **567 us**      | 10.3x |
 | IVFPQSnapIndex | 3,250   | 3,020          | **434 us**      | 7.5x  |
+
+Note: recall numbers depend heavily on the corpus. Random vectors
+(used in microbenchmarks) have lower recall than real embeddings
+because score gaps are smaller. Historical FIQA/BGE-small numbers
+(N=57K, nlist=512): recall=0.977 at nprobe=64 + rerank(100).
 
 ### What was tried and rejected
 
