@@ -177,3 +177,107 @@ Reaching < 1 ms / query at the 0.91-recall operating point requires
 either dropping to a compiled inner loop (Numba / Cython / C) or
 reducing M significantly (which costs recall).  This is the v0.5
 ceiling, and the v0.6 roadmap.
+
+
+## 2026-04-16 -- Vectorised LUT + ADC Sprint
+
+Goal: eliminate the two M=192 Python loops in the search hot path
+(LUT construction and ADC scoring) without leaving pure NumPy.
+
+### LUT construction: batched matmul -- SHIPPED (7x)
+
+Replace M separate per-subspace matmuls with one batched np.matmul:
+
+```python
+# Before: 192 dispatches, ~140 us
+for j in range(M):
+    lut[j] = codebooks[j] @ q_split[j]
+
+# After: 1 dispatch, ~19 us
+q_split = q_pre.reshape(M, d_sub, 1)
+lut = np.matmul(codebooks, q_split).squeeze(-1)
+```
+
+Also replaced einsum with transpose+matmul in the batch path.
+
+**Measured:** 7.3x speedup (140 us -> 19 us), consistent across runs.
+After this change, LUT build drops from ~10% of search time to <1%.
+
+### ADC scoring: vectorised approaches -- ALL FAILED
+
+Tested five strategies to replace the per-subspace scoring loop:
+
+| Method                        | n=500  | n=3.5K | n=50K  |
+|-------------------------------|--------|--------|--------|
+| loop (baseline, col-major)    | 1.00x  | 1.00x  | 1.00x  |
+| np.take_along_axis            | 0.85x  | 0.43x  | 0.43x  |
+| fancy indexing                | 0.85x  | 0.43x  | 0.43x  |
+| chunked (8/16/32/64)         | 0.61x  | 0.38x  | 0.40x  |
+| flat indexing (precomputed)   | 2.14x  | 1.12x  | 0.96x  |
+| sparse CSR matvec (no build)  | 3.29x  | 1.71x  | 1.48x  |
+| sparse CSR matvec (with build)| 0.38x  | 0.20x  | 0.20x  |
+
+**Why they lose:** All vectorised approaches materialise an (M, n_cand)
+intermediate (2.7 MB at n=3500). The loop accumulates in-place into a
+14 KB buffer that stays in L1 cache. Cache locality beats dispatch
+elimination at every realistic operating point.
+
+**Sparse CSR** wins spectacularly when the matrix is pre-built, but CSR
+construction is 5-10x more expensive than the matvec itself, killing
+the total.
+
+**Flat precomputed** (store int32 flat codes at build time) gives 1.12x
+at n=3500 but costs 4x RAM for codes -- not worth it.
+
+### PQ column-major layout -- SHIPPED (1.47x)
+
+PQSnapIndex stored codes as (n, M) row-major. The ADC loop accesses
+one subspace at a time: `codes[:, j]` strides M bytes per element.
+Switching to (M, n) makes each subspace access contiguous, matching
+the IVF-PQ layout that already had this optimisation.
+
+**Measured (N=20K, M=192):**
+- Row-major (n, M): 5708 us
+- Column-major (M, n): 3888 us -- **1.47x speedup**
+
+File format unchanged (transpose on save/load for backward compat).
+
+### End-to-end profile after all changes
+
+**IVFPQSnapIndex** (N=20K, nprobe=32, ~11.7K candidates):
+
+| Stage          |    us |     % |
+|----------------|------:|------:|
+| preprocess     |     6 |  0.2% |
+| coarse_probe   |    19 |  0.6% |
+| lut_build      |    25 |  0.8% |
+| gather         |   676 | 21.6% |
+| adc_loop       |  2315 | 73.9% |
+| topk           |    84 |  2.7% |
+| **TOTAL**      |  3134 |       |
+
+**PQSnapIndex** (N=20K, full scan):
+
+| Stage          |    us |     % |
+|----------------|------:|------:|
+| preprocess     |    10 |  0.2% |
+| lut_build      |    23 |  0.4% |
+| adc_loop       |  5673 | 97.0% |
+| topk           |   159 |  2.7% |
+| **TOTAL**      |  5850 |       |
+
+### Conclusions
+
+The ADC scoring loop is genuinely optimal in pure NumPy. The per-
+subspace `scores += lut[j][cat[j]]` pattern has perfect L1 cache
+locality (14 KB working set) and cannot be beaten by any approach
+that materialises the full (M, n_cand) matrix.
+
+The remaining bottleneck split is:
+- **IVF-PQ:** 74% ADC + 22% gather. The gather phase (Python loop
+  over probed clusters, slicing contiguous memory) is the next target
+  but vectorising it requires knowing the cluster boundaries at
+  compile time -- another dispatch-bound wall.
+- **PQ:** 97% ADC. Nothing else matters.
+
+The path to < 1ms/query remains compiled code (Numba/Cython/Rust).
