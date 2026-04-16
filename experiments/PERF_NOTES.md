@@ -280,4 +280,39 @@ The remaining bottleneck split is:
   compile time -- another dispatch-bound wall.
 - **PQ:** 97% ADC. Nothing else matters.
 
+### Gather phase vectorisation -- FAILED
+
+The gather loop copies codes from nprobe probed clusters into a
+contiguous (M, total) buffer. Tested four vectorisation strategies:
+
+| Method                     | us   | vs baseline |
+|----------------------------|-----:|------------:|
+| loop (baseline)            |  104 |       1.00x |
+| np.concatenate             |  114 |       0.92x |
+| fancy index (codes[:,idx]) |  689 |       0.15x |
+| cumsum (zero Python loops) |  686 |       0.15x |
+
+**Why they lose:** The loop copies contiguous slices (memcpy per
+cluster). Fancy indexing gathers scattered indices across 192 rows,
+destroying cache locality. np.concatenate adds list-comprehension
+and allocation overhead without eliminating the per-cluster work.
+
+Baseline breakdown: 83% codes copy (contiguous, fast), 14% arange
+for row_idx, 8% scores fill. No inefficiency to exploit.
+
+
+## Pure-NumPy ceiling statement (2026-04-16)
+
+Every stage of the search pipeline has been profiled and tested
+against vectorised alternatives. The current implementation is
+at or near the pure-NumPy optimum:
+
+- **LUT build:** fused via batched matmul (7x win, shipped).
+- **ADC scoring:** per-subspace loop with L1-resident accumulator
+  beats all materialise-and-reduce strategies.
+- **Gather:** contiguous-slice loop beats fancy indexing and
+  concatenation.
+- **Top-k / coarse probe / preprocess:** <4% combined, not worth
+  optimising.
+
 The path to < 1ms/query remains compiled code (Numba/Cython/Rust).
