@@ -303,11 +303,10 @@ class PQSnapIndex(FreezableIndex):
             return []
         q_pre = self._preprocess_single(q)
 
-        # LUT[j, k] = ⟨q_j, c_{j,k}⟩
-        lut = np.empty((self.M, self.K), dtype=np.float32)
-        for j in range(self.M):
-            qj = q_pre[j * self._d_sub : (j + 1) * self._d_sub]
-            lut[j] = self._codebooks[j] @ qj
+        # LUT[j, k] = ⟨q_j, c_{j,k}⟩ -- single batched matmul.
+        q_split = q_pre.reshape(self.M, self._d_sub, 1)   # (M, d_sub, 1)
+        lut = np.matmul(self._codebooks, q_split)          # (M, K, 1)
+        lut = lut.squeeze(-1)                              # (M, K)
 
         # Score[i] = Σ_j LUT[j, codes[i, j]]
         scores = np.zeros(len(self._codes), dtype=np.float32)

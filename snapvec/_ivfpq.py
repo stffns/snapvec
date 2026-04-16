@@ -600,11 +600,10 @@ class IVFPQSnapIndex(FreezableIndex):
         if len(probe) == 0:
             return []
 
-        # Per-subspace residual LUT.
-        lut = np.empty((self.M, self.K), dtype=np.float32)
-        for j in range(self.M):
-            qj = q_pre[j * self._d_sub : (j + 1) * self._d_sub]
-            lut[j] = self._codebooks[j] @ qj
+        # Per-subspace residual LUT -- single batched matmul.
+        q_split = q_pre.reshape(self.M, self._d_sub, 1)   # (M, d_sub, 1)
+        lut = np.matmul(self._codebooks, q_split)          # (M, K, 1)
+        lut = lut.squeeze(-1)                              # (M, K)
 
         if rerank_candidates is None:
             return self._score_one(probe, coarse_dot, lut, k, filter_rows)
@@ -862,12 +861,12 @@ class IVFPQSnapIndex(FreezableIndex):
             idx = np.argpartition(-restricted, nprobe - 1, axis=1)[:, :nprobe]
             probes = allowed_clusters[idx]                     # (B, nprobe)
 
-        # One einsum, the whole batch's residual LUTs.
-        # codebooks: (M, K, d_sub).  q split: (B, M, d_sub).
+        # Batched residual LUTs via matmul (faster than einsum).
         q_split = q_pre_all.reshape(B, self.M, self._d_sub)
-        lut_batch = np.einsum(
-            "bjs,jks->bjk", q_split, self._codebooks,
-        ).astype(np.float32)                                    # (B, M, K)
+        q_t = np.transpose(q_split, (1, 0, 2))                  # (M, B, d_sub)
+        cb_t = np.transpose(self._codebooks, (0, 2, 1))         # (M, d_sub, K)
+        lut_batch = np.transpose(q_t @ cb_t, (1, 0, 2))         # (B, M, K)
+        lut_batch = lut_batch.astype(np.float32, copy=False)
 
         results: list[list[tuple[Any, float]]] = [[] for _ in range(B)]
 
