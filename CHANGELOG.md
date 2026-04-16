@@ -6,7 +6,34 @@ the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.8.0] — 2026-04-15
+## [0.8.1] -- 2026-04-16
+
+Performance-only release: push pure-NumPy search to its ceiling.
+
+### Changed
+
+- **LUT build: 7x faster** -- replace M=192 separate per-subspace
+  matmuls with a single batched `np.matmul` call.  Applies to
+  `PQSnapIndex.search()`, `IVFPQSnapIndex.search()`, and
+  `IVFPQSnapIndex.search_batch()` (einsum replaced with matmul).
+  LUT build drops from ~10% to <1% of IVF-PQ search time.
+
+- **PQSnapIndex ADC: 1.47x faster** -- switch `_codes` storage from
+  row-major `(n, M)` to column-major `(M, n)`, matching the IVF-PQ
+  layout.  Per-subspace gather now reads contiguous memory instead
+  of stride-M hops.  End-to-end PQ search is ~32% faster.
+  File format unchanged (transpose on save/load).
+
+### Performance notes
+
+Full pure-NumPy optimisation sprint documented in
+`experiments/PERF_NOTES.md`.  Tested and rejected: vectorised ADC
+via `take_along_axis` (0.4x), chunked ADC (0.4x), sparse CSR
+matvec (0.2x with build cost), gather vectorisation via fancy
+indexing (0.15x).  Pipeline structure (gather-then-score) confirmed
+optimal: 224 dispatches vs 6,144 for score-per-cluster.
+
+## [0.8.0] -- 2026-04-15
 
 Headline: **multi-reader safety + id-scoped IVF search**.  Two
 features the v0.7 users asked for once snapvec landed in multi-

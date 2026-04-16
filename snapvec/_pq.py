@@ -124,7 +124,7 @@ class PQSnapIndex(FreezableIndex):
         )
         self._ids: list[Any] = []
         self._id_to_pos: dict[Any, int] = {}
-        self._codes: NDArray[np.uint8] = np.zeros((0, M), dtype=np.uint8)
+        self._codes: NDArray[np.uint8] = np.zeros((M, 0), dtype=np.uint8)
         self._norms: NDArray[np.float32] = np.zeros(0, dtype=np.float32)
 
     # ──────────────────────────────────────────────────────────────── #
@@ -249,7 +249,7 @@ class PQSnapIndex(FreezableIndex):
             )
 
         pre, norms = self._preprocess(arr)
-        codes = np.empty((len(arr), self.M), dtype=np.uint8)
+        codes = np.empty((self.M, len(arr)), dtype=np.uint8)
         for j in range(self.M):
             Xj = pre[:, j * self._d_sub : (j + 1) * self._d_sub]
             d2 = (
@@ -257,14 +257,15 @@ class PQSnapIndex(FreezableIndex):
                 - 2 * Xj @ self._codebooks[j].T
                 + (self._codebooks[j] ** 2).sum(1)[None, :]
             )
-            codes[:, j] = d2.argmin(1).astype(np.uint8)
+            codes[j] = d2.argmin(1).astype(np.uint8)
 
         start = len(self._ids)
         self._ids.extend(ids)
         for i, id_val in enumerate(ids):
             self._id_to_pos[id_val] = start + i
         self._codes = (
-            codes if len(self._codes) == 0 else np.vstack([self._codes, codes])
+            codes if self._codes.shape[1] == 0
+            else np.concatenate([self._codes, codes], axis=1)
         )
         if not self.normalized:
             self._norms = (
@@ -278,7 +279,7 @@ class PQSnapIndex(FreezableIndex):
             return False
         pos = self._id_to_pos.pop(id)
         self._ids.pop(pos)
-        self._codes = np.delete(self._codes, pos, axis=0)
+        self._codes = np.delete(self._codes, pos, axis=1)
         if not self.normalized:
             self._norms = np.delete(self._norms, pos)
         for k, p in self._id_to_pos.items():
@@ -303,16 +304,15 @@ class PQSnapIndex(FreezableIndex):
             return []
         q_pre = self._preprocess_single(q)
 
-        # LUT[j, k] = ⟨q_j, c_{j,k}⟩
-        lut = np.empty((self.M, self.K), dtype=np.float32)
-        for j in range(self.M):
-            qj = q_pre[j * self._d_sub : (j + 1) * self._d_sub]
-            lut[j] = self._codebooks[j] @ qj
+        # LUT[j, k] = ⟨q_j, c_{j,k}⟩ -- single batched matmul.
+        q_split = q_pre.reshape(self.M, self._d_sub, 1)   # (M, d_sub, 1)
+        lut = np.matmul(self._codebooks, q_split)          # (M, K, 1)
+        lut = lut.squeeze(-1)                              # (M, K)
 
-        # Score[i] = Σ_j LUT[j, codes[i, j]]
-        scores = np.zeros(len(self._codes), dtype=np.float32)
+        # Score[i] = Σ_j LUT[j, codes[j, i]]
+        scores = np.zeros(self._codes.shape[1], dtype=np.float32)
         for j in range(self.M):
-            scores += lut[j][self._codes[:, j]]
+            scores += lut[j][self._codes[j]]
 
         if not self.normalized:
             scores = scores * self._norms
@@ -381,7 +381,7 @@ class PQSnapIndex(FreezableIndex):
             )
             f.write(self._codebooks.tobytes())
             if n > 0:
-                f.write(self._codes.tobytes())
+                f.write(np.ascontiguousarray(self._codes.T).tobytes())
                 if not self.normalized:
                     f.write(self._norms.tobytes())
                 for id_val in self._ids:
@@ -433,7 +433,7 @@ class PQSnapIndex(FreezableIndex):
                 idx._codes = (
                     np.frombuffer(f.read(n * M), dtype=np.uint8)
                     .reshape(n, M)
-                    .copy()
+                    .T.copy()
                 )
                 if not normalized:
                     idx._norms = np.frombuffer(f.read(n * 4), dtype=np.float32).copy()
