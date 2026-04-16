@@ -160,8 +160,8 @@ Rerank cost is a single `(rerank_candidates, dim) @ (dim,)` matmul (~38k ops at 
 
 | Mode | Recall@10 | us/query |
 |---|---:|---:|
-| PQ full-scan | 0.915 | 1,529 |
-| IVF-PQ nprobe=64 + rerank | **0.977** | **441** |
+| PQSnapIndex full scan (no IVF, no rerank) | 0.915 | 1,529 |
+| IVFPQSnapIndex nprobe=64 + rerank(100) | **0.977** | **441** |
 
 More recall, 3.5x faster. The rerank pass breaks the accuracy/speed tradeoff: IVF-PQ + rerank is strictly superior to full-scan PQ -- not a compromise, an improvement on both axes.
 
@@ -181,7 +181,7 @@ v0.9.0 adds Cython+OpenMP compiled ADC kernels. Latency comparison on the same F
 | 64 | 2,550 us | **441 us** | **5.8x** |
 | 128 | 4,590 us | **635 us** | **7.2x** |
 
-snapvec reaches recall 0.98 at sub-ms latency on BEIR FiQA (BGE-small, N=57K) with a NumPy-only runtime dependency. This is in the same recall range as libraries that depend on SIMD popcount intrinsics (RaBitQ) or GPU-accelerated codebooks (FAISS-GPU), at the cost of a single compiled wheel -- a trade-off of distribution simplicity vs asymptotic optimality.
+snapvec reaches recall 0.98 at sub-ms latency on BEIR FiQA (BGE-small, N=57K) with a NumPy-only runtime dependency. This is in the same recall range as libraries that depend on SIMD popcount intrinsics (RaBitQ) or GPU-accelerated codebooks (FAISS-GPU), achieved here with a single compiled wheel -- trading some asymptotic optimality for distribution simplicity.
 
 The Cython+OpenMP kernel matches Numba-parallel performance without the 143MB LLVM runtime, so Numba was evaluated and dropped from the dependency graph. snapvec's only runtime dependency is numpy.
 
@@ -635,8 +635,10 @@ highlights:
 pip install snapvec
 ```
 
-**Requirements:** Python >= 3.10, NumPy >= 1.24, C compiler (for Cython extension).
-No other runtime dependencies.
+**Requirements:** Python >= 3.10, NumPy >= 1.24. No other runtime dependencies.
+Pre-built wheels will be available for common platforms (macOS, Linux x86_64,
+Windows) via `pip install`; building from source requires a C compiler for the
+Cython extension.
 
 For development:
 
