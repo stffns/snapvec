@@ -9,7 +9,11 @@
 - **`PQSnapIndex`** — *train-once product quantization*.  Learns per-subspace k-means codebooks; delivers **+15–18 pp recall@10** over `SnapIndex` at matched bytes/vec on modern LLM embeddings, and opens ultra-compressed modes (16 / 32 / 64 B/vec) that scalar quantization cannot reach.  Cost is one offline `fit(sample)` call.
 - **`IVFPQSnapIndex`** — *sub-linear search at scale*, with an optional **float16 rerank pass** that breaks the PQ recall ceiling.  Inverted-file coarse partition on top of residual PQ, visiting only `nprobe / nlist` of the corpus per query.  With `keep_full_precision=True` + `rerank_candidates=100`, IVF-PQ reaches **recall@10 = 0.977 at 441 us/query** on BGE-small / FIQA (N=57K) -- 5.8x faster than v0.6 at identical recall, past the PQ-only 0.929 ceiling.
 
-All four file formats (`.snpv` / `.snpq` / `.snpr` / `.snpi`) carry a CRC32 trailer from v0.7 on — silent disk or transport corruption is caught at `load()` time instead of returning wrong results.
+All four file formats (`.snpv` / `.snpq` / `.snpr` / `.snpi`) carry a CRC32 trailer from v0.7 on -- silent disk or transport corruption is caught at `load()` time instead of returning wrong results.
+
+### Context
+
+snapvec was developed as the quantization layer for [vstash](https://github.com/stffns/vstash), a local-first hybrid retrieval system, to extend it to corpora beyond the float32 memory budget while preserving its dependency-minimal design. It stands alone as a quantization library, but the design constraints (NumPy-only base install, no SIMD intrinsics required, predictable latency) come from vstash's local-first requirements.
 
 ```
 pip install snapvec
