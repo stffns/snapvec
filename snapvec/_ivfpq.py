@@ -866,7 +866,6 @@ class IVFPQSnapIndex(FreezableIndex):
         q_t = np.transpose(q_split, (1, 0, 2))                  # (M, B, d_sub)
         cb_t = np.transpose(self._codebooks, (0, 2, 1))         # (M, d_sub, K)
         lut_batch = np.transpose(q_t @ cb_t, (1, 0, 2))         # (B, M, K)
-        lut_batch = lut_batch.astype(np.float32, copy=False)
 
         results: list[list[tuple[Any, float]]] = [[] for _ in range(B)]
 

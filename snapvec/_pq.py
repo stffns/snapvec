@@ -265,7 +265,7 @@ class PQSnapIndex(FreezableIndex):
             self._id_to_pos[id_val] = start + i
         self._codes = (
             codes if self._codes.shape[1] == 0
-            else np.hstack([self._codes, codes])
+            else np.concatenate([self._codes, codes], axis=1)
         )
         if not self.normalized:
             self._norms = (

@@ -160,9 +160,9 @@ for q in queries:
     lut = np.matmul(pq._codebooks, q_split).squeeze(-1)
     t2 = time.perf_counter()
 
-    scores = np.zeros(len(pq._codes), dtype=np.float32)
+    scores = np.zeros(pq._codes.shape[1], dtype=np.float32)
     for j in range(pq.M):
-        scores += lut[j][pq._codes[:, j]]
+        scores += lut[j][pq._codes[j]]
     t3 = time.perf_counter()
 
     k_eff = min(10, len(scores))
@@ -200,8 +200,8 @@ print("=" * 70)
 
 import timeit
 
-codes_row = pq._codes                          # (n, M) -- current layout
-codes_col = pq._codes.T.copy()                 # (M, n) -- IVF-PQ layout
+codes_col = pq._codes                          # (M, n) -- current layout
+codes_row = pq._codes.T.copy()                 # (n, M) -- legacy layout
 
 # Build LUT once for fair comparison
 q_pre = pq._preprocess_single(queries[0].astype(np.float32))
