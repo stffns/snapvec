@@ -695,10 +695,6 @@ class IVFPQSnapIndex(FreezableIndex):
                 np.empty(0, dtype=np.int64),
             )
 
-        # Contiguous gather: each probed cluster is a contiguous slice
-        # of _codes along axis=1 (column-major (M, n) layout).  Build
-        # (M, total) cat by concatenating the M-major slices once, so
-        # the per-subspace gather stays contiguous in memory.
         cat = np.empty((self.M, total), dtype=np.uint8)
         row_idx = np.empty(total, dtype=np.int64)
         scores = np.empty(total, dtype=np.float32)
