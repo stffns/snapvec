@@ -33,7 +33,10 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
-from ._fast import adc_colmajor
+try:
+    from ._fast import adc_colmajor
+except ImportError:
+    from ._fast_fallback import adc_colmajor  # type: ignore[assignment]
 from ._file_format import save_with_checksum_atomic, verify_checksum
 from ._freezable import FreezableIndex
 from ._kmeans import kmeans_mse

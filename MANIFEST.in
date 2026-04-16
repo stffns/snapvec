@@ -1,0 +1,5 @@
+include snapvec/_fast.pyx
+include snapvec/_fast.c
+include CHANGELOG.md
+include LICENSE
+recursive-include tests *.py

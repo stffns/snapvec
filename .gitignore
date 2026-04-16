@@ -18,5 +18,5 @@ dist/
 experiments/.cache_*.npy
 .claude/scheduled_tasks.lock
 *.so
-*.c
+snapvec/_fast.c
 build/

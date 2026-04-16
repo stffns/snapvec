@@ -39,7 +39,7 @@ extensions = [
         "snapvec._fast",
         sources=["snapvec/_fast.pyx"],
         include_dirs=[np.get_include()],
-        extra_compile_args=["-O3"] + compile_flags,
+        extra_compile_args=["-O3", "-march=native"] + compile_flags,
         extra_link_args=link_flags,
     ),
 ]

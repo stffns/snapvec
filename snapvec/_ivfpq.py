@@ -40,7 +40,10 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
-from ._fast import fused_gather_adc
+try:
+    from ._fast import fused_gather_adc
+except ImportError:
+    from ._fast_fallback import fused_gather_adc  # type: ignore[assignment]
 from ._file_format import save_with_checksum_atomic, verify_checksum
 from ._freezable import FreezableIndex
 from ._kmeans import assign_l2, kmeans_mse, probe_scores_l2_monotone
@@ -711,6 +714,7 @@ class IVFPQSnapIndex(FreezableIndex):
             cursor += n_c
 
         scores = np.empty(total, dtype=np.float32)
+        assert int(row_idx.max()) < self._codes.shape[1] if total > 0 else True
         fused_gather_adc(self._codes, row_idx, coarse_offsets,
                          lut, scores, parallel=_parallel)
 

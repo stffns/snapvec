@@ -37,7 +37,7 @@ def adc_colmajor(
 
 def fused_gather_adc(
     const unsigned char[:, :] all_codes,
-    const long[:] row_idx,
+    const np.int64_t[:] row_idx,
     const float[:] coarse_offsets,
     const float[:, :] lut,
     float[:] scores,
@@ -46,7 +46,7 @@ def fused_gather_adc(
     cdef Py_ssize_t M = all_codes.shape[0]
     cdef Py_ssize_t n = row_idx.shape[0]
     cdef Py_ssize_t i, j
-    cdef long r
+    cdef np.int64_t r
     cdef float acc
     cdef float* out = &scores[0]
 
