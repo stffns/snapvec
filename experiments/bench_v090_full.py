@@ -146,7 +146,7 @@ def bench_ivfpq(N, corpus, queries, exact_results):
 
 def main():
     print("snapvec v0.9.0 -- Full Benchmark Suite")
-    print(f"Python kernels: Cython + OpenMP")
+    print("Python kernels: Cython + OpenMP")
     print(f"Parameters: dim={DIM}, M={M}, K={K}, nlist={NLIST}")
     print(f"Queries: {N_QUERIES}")
 

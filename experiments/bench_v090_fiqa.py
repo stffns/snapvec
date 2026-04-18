@@ -67,7 +67,7 @@ def main() -> None:
 
     N = len(corpus)
     dim = corpus.shape[1]
-    print(f"snapvec v0.9.0 -- FIQA/BGE-small Benchmark")
+    print("snapvec v0.9.0 -- FIQA/BGE-small Benchmark")
     print(f"corpus: {N:,} x {dim}  |  queries: {len(queries)}")
     print(f"M={M}, K={K}, nlist={NLIST}")
 

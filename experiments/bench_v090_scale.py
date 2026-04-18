@@ -173,7 +173,7 @@ def main() -> None:
         corpus = augment_corpus(base_corpus, target_n, rng)
         print(f"  corpus: {corpus.shape[0]:,} vectors")
 
-        print(f"\n  Brute-force ground truth...", flush=True)
+        print("\n  Brute-force ground truth...", flush=True)
         t0 = perf_counter()
         truth = brute_topk(queries, corpus)
         bf_s = perf_counter() - t0

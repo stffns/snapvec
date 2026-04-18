@@ -1,5 +1,4 @@
 """Build script for Cython extensions with OpenMP support."""
-import platform
 import subprocess
 import sys
 

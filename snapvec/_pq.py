@@ -25,7 +25,6 @@ stored vector is the sum of ``LUT[j, codes[i, j]]`` over ``j``.
 """
 from __future__ import annotations
 
-import os
 import struct
 from pathlib import Path
 from typing import Any
