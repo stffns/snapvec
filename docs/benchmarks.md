@@ -43,24 +43,33 @@ story, use sqlite-vec or FAISS `IndexFlatIP`.
 
 | Backend | recall@10 | p50 us | p99 us | disk MB | build s |
 |---------|----------:|-------:|-------:|--------:|--------:|
-| sqlite-vec (brute-force cosine, exact) | **1.000** | 13757 | 17539 | 91.1 | 0.5 |
-| hnswlib (M=32, ef_search=128) | 0.994 | 507 | 823 | 104.5 | 43 |
-| **snapvec IVFPQ + fp16 rerank (M=192)** | **0.945** | **346** | 417 | 56.9 | 107 |
-| FAISS IVFPQ (M=192) [matched-budget] | 0.906 | 484 | 2116 | 12.7 | 17 |
-| **snapvec IVFPQ no rerank (M=192)** | 0.895 | **319** | 392 | 12.6 | 108 |
-| snapvec SnapIndex 4-bit scalar (full-scan) | 0.854 | 2727 | 4152 | 15.4 | 1.1 |
-| snapvec SnapIndex 3-bit scalar (full-scan) | 0.736 | 2717 | 2965 | 11.7 | 0.8 |
-| FAISS IVFPQ (M=48) | 0.603 | 143 | 194 | 4.4 | 10 |
-| snapvec SnapIndex 2-bit scalar (full-scan) | 0.618 | 2649 | 3127 | 8.0 | 0.7 |
-| snapvec IVFPQ no rerank (M=48) [matched-budget] | 0.549 | 269 | 342 | 4.3 | 33 |
+| sqlite-vec (brute-force cosine, exact) | **1.000** | 13891 | 18628 | 91.1 | 0.5 |
+| hnswlib (M=32, ef_search=128) | 0.994 | 561 | 994 | 104.5 | 45 |
+| **snapvec IVFPQ + fp16 rerank (M=192)** | **0.945** | **359** | 457 | 56.9 | 108 |
+| FAISS IVFPQ (M=192) [matched-budget] | 0.906 | 483 | 584 | 12.7 | 17 |
+| **snapvec IVFPQ no rerank (M=192)** | 0.895 | **325** | 376 | 12.6 | 110 |
+| snapvec SnapIndex 4-bit scalar (full-scan) | 0.854 | 2676 | 3164 | 15.4 | 1.1 |
+| snapvec SnapIndex 3-bit scalar (full-scan) | 0.736 | 2688 | 3013 | 11.7 | 0.8 |
+| snapvec SnapIndex 2-bit scalar (full-scan) | 0.618 | 2726 | 4016 | 8.0 | 0.7 |
+| FAISS IVFPQ (M=48) | 0.603 | 142 | 200 | 4.4 | 10 |
+| snapvec IVFPQ no rerank (M=48) [matched-budget] | 0.549 | 267 | 350 | 4.3 | 33 |
 
 Rows ordered by recall@10 descending.
+
+**Methodology.** All numbers come from a single fresh-process run of
+`experiments/bench_competitive.py` so backend-to-backend comparisons
+are not contaminated by OS page-cache state inherited from earlier
+runs.  An earlier multi-session measurement showed a ~56% p50 delta
+on SnapIndex between cold and warm runs; the single-run convention
+above eliminates that.
 
 Thread pinning: `faiss.omp_set_num_threads(1)` + `idx.set_num_threads(1)`
 on the hnswlib instance (set before `add_items`) for apples-to-apples
 build and search timings.  snapvec's `fit` still uses whatever NumPy
 BLAS is configured to; for this machine `np.show_config()` reports
-Accelerate with its default thread count.
+Accelerate with its default thread count.  Expected run-to-run noise
+on this hardware is <=5% p50 for every row except hnswlib, which
+hits +/-10% routinely.
 
 ### Reading the table
 
