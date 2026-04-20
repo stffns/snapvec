@@ -55,6 +55,9 @@ docs = [
 [tool.setuptools.packages.find]
 include = ["snapvec*"]
 
+[tool.setuptools.package-data]
+snapvec = ["py.typed", "*.pyi"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
@@ -70,7 +73,8 @@ warn_return_any = true
 warn_unused_ignores = true
 disallow_untyped_defs = true
 disallow_any_generics = false
-plugins = ["numpy.typing.mypy_plugin"]
+# numpy.typing.mypy_plugin is deprecated as of NumPy 2.3; NDArray typing
+# works without it on modern numpy.
 
 [[tool.mypy.overrides]]
 module = "tests.*"

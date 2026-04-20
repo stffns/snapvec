@@ -45,13 +45,13 @@ from __future__ import annotations
 
 import struct
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 from numpy.typing import NDArray
 
 from ._codebooks import get_codebook
-from ._file_format import save_with_checksum_atomic, verify_checksum
+from ._file_format import ChecksumWriter, save_with_checksum_atomic, verify_checksum
 from ._freezable import FreezableIndex
 from ._rotation import padded_dim, rht
 
@@ -556,7 +556,7 @@ class SnapIndex(FreezableIndex):
         else:
             packed = _pack(self._indices, self._mse_bits)
 
-        def _write(f):
+        def _write(f: "ChecksumWriter") -> None:
             f.write(_MAGIC)
             f.write(struct.pack("<IIIIII", _VERSION, self.dim, self.bits, self.seed, n, flags))
             f.write(struct.pack("<I", len(packed)))
@@ -800,7 +800,10 @@ def _unpack(
         return result
     if bits == 3 and not legacy_3bit:
         arr = np.frombuffer(data, dtype=np.uint8)
-        return _unpack_3bit_tight(arr)[:total].reshape(n_rows, n_cols).copy()
+        return cast(
+            "NDArray[np.uint8]",
+            _unpack_3bit_tight(arr)[:total].reshape(n_rows, n_cols).copy(),
+        )
     # Byte-aligned path: 2-bit, 4-bit, and legacy 3-bit (v1/v2)
     ipb = 8 // bits
     mask = (1 << bits) - 1

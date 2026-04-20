@@ -1,5 +1,7 @@
 include snapvec/_fast.pyx
 include snapvec/_fast.c
+include snapvec/_fast.pyi
+include snapvec/py.typed
 include CHANGELOG.md
 include LICENSE
 recursive-include tests *.py

@@ -30,6 +30,7 @@ import os
 import struct
 import zlib
 from pathlib import Path
+from types import TracebackType
 from typing import IO, Callable
 
 
@@ -81,7 +82,12 @@ class ChecksumWriter:
     def __enter__(self) -> "ChecksumWriter":
         return self
 
-    def __exit__(self, exc_type, exc, tb) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
         if exc_type is None:
             self.finalise()
 
