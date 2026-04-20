@@ -1,5 +1,11 @@
 # snapvec
 
+[![PyPI version](https://img.shields.io/pypi/v/snapvec.svg)](https://pypi.org/project/snapvec/)
+[![Python versions](https://img.shields.io/pypi/pyversions/snapvec.svg)](https://pypi.org/project/snapvec/)
+[![CI](https://github.com/stffns/snapvec/actions/workflows/ci.yml/badge.svg)](https://github.com/stffns/snapvec/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![Downloads](https://static.pepy.tech/badge/snapvec/month)](https://pepy.tech/project/snapvec)
+
 **Fast compressed approximate nearest-neighbor search.  NumPy + Cython compiled kernels.**
 
 `snapvec` ships **four index types** for embedding vector search, each targeting a different point on the accuracy / storage / latency frontier:

@@ -137,7 +137,6 @@ def test_search_batch_unnormalized_matches_loop() -> None:
     in) must still match the per-query loop, since the multi-step
     pipeline (norm, RHT-or-not, gather, norm-multiply) is more
     sensitive than the normalized=True path."""
-    rng = np.random.default_rng(95)
     d, n_corpus, n_queries = 64, 500, 20
     base = _clustered(n_corpus, d, n_clusters=20, seed=95)
     scales = np.linspace(0.5, 5.0, n_corpus).astype(np.float32)
@@ -285,7 +284,6 @@ def test_rerank_candidate_pool_respects_norms_when_unnormalized() -> None:
     high-norm vector that genuinely wins on ⟨q, v⟩ can miss the
     candidate pool because its unit-sphere PQ score is modest.
     This was the high-priority bug caught on the PR #27 review."""
-    rng = np.random.default_rng(140)
     # Build corpus where recall truth depends heavily on per-vector
     # norm magnitude: same directions scaled across a wide range.
     d, n_corpus = 64, 400
@@ -610,13 +608,12 @@ def test_load_validates_offsets(tmp_path: Path) -> None:
     path = tmp_path / "x.snpi"
     idx.save(path)
 
-    # Corrupt: scramble offsets to be non-monotone (swap first two).
-    buf = bytearray(path.read_bytes())
-    # Offsets are stored right after coarse + codebooks.  Easier to
-    # mutate via a fresh reload, edit, re-save.
+    # Corrupt: break the offsets[0] == 0 invariant so the loader rejects
+    # the file.  Easier to reload, mutate in memory, and re-save than to
+    # patch raw bytes at the right offset inside the binary format.
     reloaded = IVFPQSnapIndex.load(path)
     reloaded._offsets = reloaded._offsets.copy()
-    reloaded._offsets[0] = 99  # break the offsets[0]==0 invariant
+    reloaded._offsets[0] = 99
     reloaded.save(path)
     with pytest.raises(ValueError, match="offsets"):
         IVFPQSnapIndex.load(path)

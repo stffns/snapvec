@@ -25,7 +25,6 @@ def fused_gather_adc(
     parallel: bool = True,
 ) -> None:
     M = all_codes.shape[0]
-    n = len(row_idx)
     cat = all_codes[:, row_idx]
     scores[:] = coarse_offsets
     for j in range(M):

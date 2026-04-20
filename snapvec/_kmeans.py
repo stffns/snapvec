@@ -10,7 +10,6 @@ indexes use at query time to match the metric used during training.
 """
 from __future__ import annotations
 
-from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray

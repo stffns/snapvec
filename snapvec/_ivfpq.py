@@ -29,7 +29,6 @@ worth it).  Classic FAISS rule-of-thumb ``nlist ≈ 4·√N``.
 """
 from __future__ import annotations
 
-import os
 import struct
 import threading
 import warnings

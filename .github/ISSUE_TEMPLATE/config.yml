@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or usage help
+    url: https://github.com/stffns/snapvec/discussions
+    about: For questions about using snapvec, please use GitHub Discussions.

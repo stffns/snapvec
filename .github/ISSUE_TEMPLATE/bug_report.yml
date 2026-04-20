@@ -1,0 +1,68 @@
+name: Bug report
+description: Report a correctness, performance, or crash issue in snapvec.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a report. A minimal reproducer
+        and your environment details shorten the feedback loop a lot.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: One or two sentences describing the issue.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Minimal code that triggers the issue. Include random seeds.
+      render: python
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs actual behaviour
+    validations:
+      required: true
+
+  - type: input
+    id: snapvec-version
+    attributes:
+      label: snapvec version
+      placeholder: "0.9.0"
+    validations:
+      required: true
+
+  - type: input
+    id: python-version
+    attributes:
+      label: Python version
+      placeholder: "3.12.2"
+    validations:
+      required: true
+
+  - type: input
+    id: numpy-version
+    attributes:
+      label: NumPy version
+      placeholder: "1.26.4"
+
+  - type: input
+    id: platform
+    attributes:
+      label: OS and CPU
+      placeholder: "macOS 14.4 arm64 / Ubuntu 22.04 x86_64 / ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
