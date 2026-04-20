@@ -1,0 +1,60 @@
+cff-version: 1.2.0
+message: "If you use snapvec in your research, please cite it as below."
+title: "snapvec: fast compressed approximate nearest-neighbor search"
+authors:
+  - family-names: "Steffens"
+    given-names: "Jayson"
+    email: "stffens@gmail.com"
+type: software
+version: "0.10.0"
+date-released: "2026-04-20"
+license: MIT
+repository-code: "https://github.com/stffns/snapvec"
+url: "https://stffns.github.io/snapvec/"
+keywords:
+  - "approximate nearest neighbor"
+  - "vector search"
+  - "quantization"
+  - "product quantization"
+  - "randomized Hadamard transform"
+  - "TurboQuant"
+  - "embeddings"
+  - "retrieval"
+abstract: >-
+  snapvec is a Python library for fast, compressed approximate
+  nearest-neighbor search over embedding vectors.  It implements
+  randomized Hadamard transform plus Lloyd-Max scalar quantization
+  (TurboQuant), product quantization, and IVF-PQ with optional
+  float16 rerank.  Runtime dependencies are limited to NumPy; hot
+  paths are compiled via Cython and OpenMP.
+references:
+  - type: article
+    authors:
+      - family-names: "Zandieh"
+        given-names: "Amir"
+      - family-names: "Daliri"
+        given-names: "Mahdi"
+      - family-names: "Hadian"
+        given-names: "Amirhossein"
+      - family-names: "Mirrokni"
+        given-names: "Vahab"
+    title: "TurboQuant: Online Vector Quantization with Near-optimal Distortion Rate"
+    year: 2025
+    identifiers:
+      - type: other
+        value: "arXiv:2504.19874"
+  - type: article
+    authors:
+      - family-names: "Jégou"
+        given-names: "Hervé"
+      - family-names: "Douze"
+        given-names: "Matthijs"
+      - family-names: "Schmid"
+        given-names: "Cordelia"
+    title: "Product Quantization for Nearest Neighbor Search"
+    journal: "IEEE Transactions on Pattern Analysis and Machine Intelligence"
+    year: 2011
+    volume: 33
+    number: 1
+    start: 117
+    end: 128
