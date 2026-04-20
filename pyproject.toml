@@ -55,6 +55,9 @@ docs = [
 [tool.setuptools.packages.find]
 include = ["snapvec*"]
 
+[tool.setuptools.package-data]
+snapvec = ["py.typed", "*.pyi"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]

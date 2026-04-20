@@ -108,9 +108,13 @@ def probe_scores_l2_monotone(
     probe time gives slightly lower recall, especially with uneven
     cluster sizes.
     """
+    # np.float32(2.0) guards against NEP 50-era numpy upcasting a
+    # Python '2.0' scalar to float64 here; on numpy >= 2.0 this is a
+    # no-op, on older numpy it keeps the return dtype matching the
+    # annotation.
     return cast(
         "NDArray[np.float32]",
-        2.0 * (coarse @ q) - (coarse ** 2).sum(1),
+        np.float32(2.0) * (coarse @ q) - (coarse ** 2).sum(1),
     )
 
 
