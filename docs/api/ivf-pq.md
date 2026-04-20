@@ -1,0 +1,3 @@
+# IVFPQSnapIndex
+
+::: snapvec.IVFPQSnapIndex

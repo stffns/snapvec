@@ -3,671 +3,89 @@
 [![PyPI version](https://img.shields.io/pypi/v/snapvec.svg)](https://pypi.org/project/snapvec/)
 [![Python versions](https://img.shields.io/pypi/pyversions/snapvec.svg)](https://pypi.org/project/snapvec/)
 [![CI](https://github.com/stffns/snapvec/actions/workflows/ci.yml/badge.svg)](https://github.com/stffns/snapvec/actions/workflows/ci.yml)
+[![Docs](https://github.com/stffns/snapvec/actions/workflows/docs.yml/badge.svg)](https://stffns.github.io/snapvec/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Downloads](https://static.pepy.tech/badge/snapvec/month)](https://pepy.tech/project/snapvec)
 
-**Fast compressed approximate nearest-neighbor search.  NumPy + Cython compiled kernels.**
+**Fast compressed approximate nearest-neighbor search. NumPy + Cython compiled kernels.**
 
-`snapvec` ships **four index types** for embedding vector search, each targeting a different point on the accuracy / storage / latency frontier:
+Four index types for embedding vector search, each targeting a different
+point on the accuracy / storage / latency frontier:
 
-- **`SnapIndex`** — *training-free scalar*.  Implements [TurboQuant](https://arxiv.org/abs/2504.19874) (randomized Hadamard transform + Lloyd-Max scalar quantization).  Works out-of-the-box on any vector distribution, no calibration or corpus sample required.  **~6× / ~8× / ~12× compression at 4 / 3 / 2 bits** with **>0.92 recall@10** on real embeddings.
-- **`ResidualSnapIndex`** — *training-free, two-stage scalar*.  Cascades coarse + residual Lloyd-Max quantization to reach operating points `SnapIndex` alone cannot (5 / 6 / 7 bits/coord with recall up to 0.96), and offers a coarse-pass + rerank search mode that converges to full-reconstruction recall at O(`rerank_M`) candidates instead of O(N) (e.g. `rerank_M = 100` already saturates on the tested corpora).
-- **`PQSnapIndex`** — *train-once product quantization*.  Learns per-subspace k-means codebooks; delivers **+15–18 pp recall@10** over `SnapIndex` at matched bytes/vec on modern LLM embeddings, and opens ultra-compressed modes (16 / 32 / 64 B/vec) that scalar quantization cannot reach.  Cost is one offline `fit(sample)` call.
-- **`IVFPQSnapIndex`** — *sub-linear search at scale*, with an optional **float16 rerank pass** that breaks the PQ recall ceiling.  Inverted-file coarse partition on top of residual PQ, visiting only `nprobe / nlist` of the corpus per query.  With `keep_full_precision=True` + `rerank_candidates=100`, IVF-PQ reaches **recall@10 = 0.977 at 441 us/query** on BGE-small / FIQA (N=57K) -- 5.8x faster than v0.6 at identical recall, past the PQ-only 0.929 ceiling.
+| Index | Training | Compression | Recall | Use when |
+|-------|----------|-------------|--------|----------|
+| `SnapIndex` | none | 6-12x | 0.92+ | Any distribution, no corpus sample |
+| `ResidualSnapIndex` | none | 4-8x | 0.96 | Higher recall, still training-free |
+| `PQSnapIndex` | one-off `fit` | 24-96x | 0.95 | Modern LLM embeddings, aggressive compression |
+| `IVFPQSnapIndex` | one-off `fit` | 24-96x | 0.98 | Sub-linear search at scale (N > 100k) |
 
-All four file formats (`.snpv` / `.snpq` / `.snpr` / `.snpi`) carry a CRC32 trailer from v0.7 on -- silent disk or transport corruption is caught at `load()` time instead of returning wrong results.
+Headline number: **recall@10 = 0.977 at 441 us/query** on BEIR FIQA
+(N = 57,638, BGE-small), 25-125x faster than sqlite-vec at comparable
+recall.
 
-### Context
+## Install
 
-snapvec was developed as the quantization layer for [vstash](https://github.com/stffns/vstash), a local-first hybrid retrieval system, to extend it to corpora beyond the float32 memory budget while preserving its dependency-minimal design. It stands alone as a quantization library, but the design constraints (NumPy-only base install, no SIMD intrinsics required, predictable latency) come from vstash's local-first requirements.
-
-```
+```bash
 pip install snapvec
 ```
 
-### Which `bits` should I use?
+On macOS you also need `brew install libomp` to build from source; the
+wheels on PyPI bundle it.
 
-| If you are… | Pick | Why |
-|-------------|------|-----|
-| Building RAG / semantic search (the default) | **`bits=4`** | ~95% recall@10 on real embeddings, 5.9× smaller than float32 |
-| Squeezing massive corpora where scale beats precision | **`bits=2`** | 11.6× smaller; recall@10 ≈ 0.83 on synthetic, higher on clustered real data |
-| Willing to pay a bit of accuracy for ~25% more compression vs 4-bit | **`bits=3`** | 7.8× smaller, now tightly packed — a genuine middle ground as of v0.3.0 |
-| Need unbiased inner-product estimates (KV-cache, attention) | **`bits=3` or `4` + `use_prod=True`** | QJL correction at the cost of ~2× search latency |
-
-### Which Index should I use?
-
-| If you need… | Use | Why |
-|---|---|---|
-| **Maximum accuracy on LLM embeddings** | `PQSnapIndex` | Exploits the embedding model's natural cluster structure.  128 B/vec with PQ matches 256 B/vec with scalar Lloyd-Max on BGE-small. |
-| **Zero setup / plug-and-play** | `SnapIndex` | No `.fit()` needed.  RHT Gaussianizes any distribution, so fixed Lloyd-Max codebooks work out of the box. |
-| **Massive scale (N ≫ 10⁶)** | `PQSnapIndex` | Enables 16 B and 32 B per-vector modes that are not physically reachable with scalar quantization (`SnapIndex` floors at ~128 B/vec for 384-dim embeddings). |
-| **Sub-linear search latency (N ≳ 10⁴)** | `IVFPQSnapIndex` | Inverted-file partition + residual PQ.  Visits only `nprobe / nlist` of the corpus per query.  With rerank: **0.977 recall at 441us** on FIQA (N=57K) -- 3.5x faster than PQ full-scan at higher recall. |
-| **Unbiased inner-product estimates** (KV-cache, attention) | `SnapIndex(use_prod=True)` | QJL residual correction; see the TurboQuant_prod section below. |
-
-On BGE-small / SciFact (3-seed mean, disjoint train/eval split):
-
-| Mode | Bytes/vec | Recall@10 | Δ vs scalar baseline |
-|---|---|---|---|
-| `SnapIndex(bits=2)` | 128 + 4 | 0.686 | — |
-| `PQSnapIndex(M=128, K=256, normalized=True)` | 128 | **0.871** | **+18.5 pp** |
-| `SnapIndex(bits=3)` | 192 + 4 | 0.781 | — |
-| `PQSnapIndex(M=192, K=256, normalized=True)` | 192 | **0.937** | **+15.6 pp** |
-| `SnapIndex(bits=4)` | 256 + 4 | 0.870 | — |
-| `PQSnapIndex(M=256, K=256, use_rht=True)` | 256 | **0.948** | **+7.8 pp** |
-
-Full sweeps in `experiments/bench_pq_scaleup_validation.py` (scalar vs PQ, K ∈ {16, 64, 256}, 3 seeds), `experiments/bench_ivf_pq_contiguous.py` (IVF-PQ layout), and `experiments/bench_v090_fiqa.py` (definitive FIQA recall + latency).
-
----
-
-## Quick start
+## Quickstart
 
 ```python
 import numpy as np
 from snapvec import SnapIndex
 
-# Build index
-idx = SnapIndex(dim=384, bits=4)          # 4-bit, ~6x compression
-# ⚠ pass float32 arrays — see "Input dtype" below
-embeddings = np.asarray(embeddings, dtype=np.float32)
-idx.add_batch(ids=list(range(N)), vectors=embeddings)
+rng = np.random.default_rng(0)
+corpus = rng.standard_normal((10_000, 384)).astype(np.float32)
 
-# Query
-results = idx.search(query_vector.astype(np.float32), k=10)  # [(id, score), ...]
+idx = SnapIndex(dim=384, bits=4, seed=0)
+idx.add_batch(list(range(10_000)), corpus)
 
-# Persist
-idx.save("my_index.snpv")
-idx2 = SnapIndex.load("my_index.snpv")   # atomic save, v1/v2/v3 compatible
+query = rng.standard_normal(384).astype(np.float32)
+for doc_id, score in idx.search(query, k=10):
+    print(doc_id, score)
+
+idx.save("my.snpv")
 ```
 
-### Quick start — `PQSnapIndex` (higher recall, one-off `fit`)
-
-```python
-from snapvec import PQSnapIndex
-
-# Build: choose M subspaces dividing dim (or pdim if use_rht=True) and K ≤ 256 centroids.
-# Storage = M bytes/vec when normalized=True (+4 bytes otherwise).
-idx = PQSnapIndex(dim=384, M=192, K=256, normalized=True)   # 192 B/vec
-
-# Train once on a representative sample (≥ K, ~10–50 k is plenty)
-idx.fit(training_vectors.astype(np.float32))
-
-# Index and query exactly like SnapIndex
-idx.add_batch(ids=list(range(N)), vectors=corpus.astype(np.float32))
-results = idx.search(query.astype(np.float32), k=10)
-
-# Persist to its own format (atomic save, .snpq magic SNPQ v1)
-idx.save("my_index.snpq")
-idx2 = PQSnapIndex.load("my_index.snpq")
-```
-
-Pick `PQSnapIndex` when you can afford the one-off `fit` step and want the recall lift documented above; pick `SnapIndex` when you need a truly training-free, drop-in index.
-
-### Quick start — `IVFPQSnapIndex` (sub-linear search at scale)
-
-```python
-from snapvec import IVFPQSnapIndex
-
-# Rule-of-thumb: nlist ≈ 4·√N (e.g. nlist = 256 for N = 20 000).
-idx = IVFPQSnapIndex(dim=384, nlist=256, M=192, K=256, normalized=True)
-
-# fit() trains both the coarse centroids and the residual PQ codebook
-idx.fit(training_vectors.astype(np.float32))
-idx.add_batch(ids=list(range(N)), vectors=corpus.astype(np.float32))
-
-# nprobe trades recall for latency. Defaults to max(1, nlist // 16).
-results = idx.search(query.astype(np.float32), k=10, nprobe=16)
-
-idx.save("my_index.snpi")
-idx2 = IVFPQSnapIndex.load("my_index.snpi")
-```
-
-#### Float32 rerank for recall above the PQ ceiling *(v0.6)*
-
-The IVF-PQ pass has a recall ceiling set by the per-subspace codebook capacity — at `M = 192, K = 256` that ceiling is **0.929** on BGE-small / FIQA, regardless of `nprobe`.  Past that, no amount of probing can recover vectors the PQ decoder couldn't distinguish.
-
-Opt in to a float32 rerank that recovers the missing recall:
-
-```python
-idx = IVFPQSnapIndex(
-    dim=384, nlist=512, M=192, K=256, normalized=True,
-    keep_full_precision=True,       # +dim × 4 bytes / vec (cached originals)
-)
-idx.fit(training_vectors)
-idx.add_batch(ids, corpus)
-
-# IVF-PQ picks top-100 candidates, then float32 reranks → top-10.
-hits = idx.search(query, k=10, nprobe=32, rerank_candidates=100)
-```
-
-On BGE-small / FIQA (N=57,638, `nlist=512`, `M=192`, `K=256`, 500 queries, v0.9.0):
-
-#### Operating points
-
-| Profile | `nprobe` | Recall@10 | us/query | Use case |
-|---------|---:|---:|---:|---|
-| **Fastest** | 16 | 0.883 | 304 | Latency-critical, recall <90% acceptable |
-| **Interactive** | 32 | 0.944 | 369 | RAG chat, autocomplete (default recommendation) |
-| **High precision** | 64 | 0.977 | 441 | Apps where recall matters |
-| **Near-exact** | 128 | 0.992 | 635 | When you need to be sure |
-
-All four sub-millisecond at N=57K with dim=384. The sweet spot is **nprobe=64**: the biggest recall jump is from nprobe=32 to nprobe=64 (+3.3pp). After that, marginal gains decay: nprobe=128 adds only +1.5pp for 44% more latency.
-
-#### Full sweep
-
-| `nprobe` | PQ recall | PQ us | + rerank recall | + rerank us |
-|---:|---:|---:|---:|---:|
-| 4 | 0.661 | 142 | 0.674 | 166 |
-| 8 | 0.771 | 195 | 0.795 | 223 |
-| 16 | 0.845 | 276 | **0.883** | 304 |
-| 32 | 0.891 | 332 | **0.944** | 369 |
-| 64 | 0.914 | 419 | **0.977** | 441 |
-| 128 | 0.924 | 617 | **0.992** | 635 |
-| 256 | 0.929 | 1004 | **0.998** | 1021 |
-
-Rerank cost is a single `(rerank_candidates, dim) @ (dim,)` matmul (~38k ops at N=100 candidates). `rerank_candidates=100` already saturates the lift -- going to 200 doesn't move the number.
-
-#### Why IVF-PQ + rerank beats PQ full-scan
-
-| Mode | Recall@10 | us/query |
-|---|---:|---:|
-| PQSnapIndex full scan (no IVF, no rerank) | 0.915 | 1,529 |
-| IVFPQSnapIndex nprobe=64 + rerank(100) | **0.977** | **441** |
-
-More recall, 3.5x faster. The rerank pass breaks the accuracy/speed tradeoff: IVF-PQ + rerank is strictly superior to full-scan PQ -- not a compromise, an improvement on both axes.
-
-Trade-off: the float16 rerank cache adds `dim x 2 bytes` per vector. At `d=384` that's +768 B/vec on top of the `M=192` codes. Opt-in; default `keep_full_precision=False` preserves the codes-only storage footprint.
-
-#### Reproducibility
-
-The recall numbers above (0.977 at nprobe=64, 0.992 at nprobe=128) reproduce the v0.6.0 measurements exactly, across three releases with non-trivial algorithmic changes (column-major layout, batched matmul LUT, Cython compiled kernels). Same config, same data, same number -- the evaluation pipeline is deterministic and the rerank path is reproducible.
-
-#### Performance vs v0.6.0
-
-v0.9.0 adds Cython+OpenMP compiled ADC kernels. Latency comparison on the same FIQA corpus:
-
-| `nprobe` + rerank | v0.6.0 | v0.9.0 | Speedup |
-|---|---:|---:|---:|
-| 32 | 1,380 us | **369 us** | **3.7x** |
-| 64 | 2,550 us | **441 us** | **5.8x** |
-| 128 | 4,590 us | **635 us** | **7.2x** |
-
-snapvec reaches recall 0.98 at sub-ms latency on BEIR FiQA (BGE-small, N=57K) with a NumPy-only runtime dependency. This is in the same recall range as libraries that depend on SIMD popcount intrinsics (RaBitQ) or GPU-accelerated codebooks (FAISS-GPU), achieved here with a single compiled wheel -- trading some asymptotic optimality for distribution simplicity.
-
-The Cython+OpenMP kernel matches Numba-parallel performance without the 143MB LLVM runtime, so Numba was evaluated and dropped from the dependency graph. snapvec's only runtime dependency is numpy.
-
-### Sizing `nlist` and the training set
-
-Two simple rules from FAISS that snapvec follows literally:
-
-- **`nlist ≈ 4·√N`** is a good starting point.  For N = 20 k that is 256; for N = 1 M that is 4 096.
-- **`n_train ≥ 30 · nlist`** for the coarse k-means to be stable.  Fewer training samples leave many clusters empty or under-trained, and recall stops responding to `nprobe` (we saw this on the v0.5 N=1M baseline: 50 k train at nlist=4 096 → ratio of 12, recall pinned at 0.731 across all `nprobe`).  `IVFPQSnapIndex.fit()` emits a `UserWarning` when this ratio is violated.
-
-| N | suggested `nlist` | minimum `n_train` |
-|---:|---:|---:|
-| 10 000 | 256 | 7 680 |
-| 100 000 | 1 024 | 30 720 |
-| 1 000 000 | 4 096 | 122 880 |
-| 10 000 000 | 16 384 | 491 520 |
-
-### Why `PQSnapIndex` defaults to `use_rht=False`
-
-The Randomized Hadamard Transform (RHT) is essential for *scalar* quantization: it Gaussianizes each coordinate so that a single fixed Lloyd-Max codebook is optimal regardless of the input distribution.  That is the entire point of `SnapIndex`.
-
-For Product Quantization the same rotation is actively harmful:
-
-- **Structure preservation.**  PQ learns a codebook per subspace by finding clusters inside that subspace.  RHT spreads every coordinate's variance uniformly across the whole vector, which increases entropy per subspace and destroys the clustered geometry k-means is trying to exploit.
-- **Empirical cost.**  Turning the RHT off and running k-means on the raw embedding subspaces buys **+15.6 pp recall@10 at 192 B/vec** on BGE-small / SciFact (0.937 vs 0.781 for `SnapIndex(bits=3)`, and 0.781 vs 0.776 for PQ-with-RHT at the same storage).  Validated across K ∈ {16, 64, 256} with 3-seed mean and std ≤ 0.01.
-
-`use_rht=True` remains available for the rare cases where the embedding distribution is genuinely isotropic already, or for sanity-checking against the scalar pipeline.  See `experiments/bench_pq_no_rht_ablation.py` for the controlled A/B.
-
-### Input dtype: pass `np.float32`
-
-`add_batch`, `add`, and `search` accept any array-like input but cast
-internally to `float32`. **If you pass `float64` (the NumPy default),
-a full-size temporary copy is allocated during the cast** — for
-`add_batch(1M × 384)` that's a transient 1.5 GB allocation on top of
-your input array, gone only after quantization completes.
-
-To avoid this:
-
-```python
-# Models that return float32 directly (most modern embeddings)
-embeddings = model.encode(texts)             # already float32 → no copy
-idx.add_batch(ids, embeddings)
-
-# Arrays from np.array([...]) default to float64 — cast explicitly
-embeddings = np.asarray(my_list, dtype=np.float32)   # cast once upfront
-idx.add_batch(ids, embeddings)
-
-# Loading from disk — respect the original dtype or force float32
-embeddings = np.load("vecs.npy").astype(np.float32, copy=False)
-```
-
-The cast is a correctness convenience, not a design choice — the whole
-pipeline (normalize, RHT, quantize) operates in `float32`.
-
----
-
-## Technical background
-
-### The problem: embedding vectors are expensive
-
-Modern embedding models produce float32 vectors of dimension `d ∈ {384, 768, 1536}`.
-Storing N vectors requires `4·N·d` bytes; brute-force search costs `O(N·d)` per query.
-For N = 1M, d = 384: **1.5 GB RAM**, with inner products dominating inference time.
-
-Product Quantization (PQ) splits vectors into M sub-vectors and quantizes each
-independently. It is effective but requires training a K-means codebook per dataset.
-Random Binary Quantization (RaBitQ, 1-bit) is fast but coarse.
-
-**TurboQuant** achieves near-optimal distortion at b bits per coordinate
-**without training codebooks**, by first rotating the space with a
-randomized Hadamard transform to make coordinates approximately
-Gaussian, then quantizing each coordinate independently with the
-optimal scalar quantizer for N(0,1).
-
-> 📄 **Paper:** Zandieh, Daliri, Hadian, Mirrokni (2025).
-> *TurboQuant: Online Vector Quantization with Near-optimal Distortion Rate.*
-> ICLR 2026 — [arXiv:2504.19874](https://arxiv.org/abs/2504.19874)
->
-> `snapvec` is an independent implementation of the algorithm described
-> in that paper, with Cython-compiled hot paths for production latency.
-> If you use snapvec in academic work, please cite the TurboQuant paper.
-
----
-
-### Algorithm
-
-#### Step 1 — Normalize
-
-Given a raw embedding `v ∈ ℝᵈ`, compute the unit vector `v̂ = v / ‖v‖` and store
-`‖v‖` separately (float32, 4 bytes per vector).
-
-#### Step 2 — Randomized Hadamard Transform (RHT)
-
-Pad `v̂` to the next power of 2 (`d' = 2^⌈log₂ d⌉`), then apply:
-
-```
-x = (1/√d') · H · D · v̂
-```
-
-where:
-- `D = diag(σ₁, …, σ_d')` — diagonal matrix of i.i.d. ±1 random signs (seed-deterministic)
-- `H` — unnormalized Walsh-Hadamard matrix (butterfly pattern)
-
-By the Johnson-Lindenstrauss lemma, each coordinate `xᵢ ≈ N(0, 1/d')`.
-After rescaling `x̃ = x · √d'`, the coordinates are approximately `N(0,1)`
-regardless of the original distribution of `v`.
-
-**Complexity:** O(d log d) — no matrix multiplication, no codebook training.
-
-**Implementation note (v0.3.0):** the butterfly is fully vectorised via a
-reshape view — each level becomes one pair of NumPy ops on the whole
-array instead of a Python `for` loop over `n / (2h)` slices. The diff is
-tiny and the speedup is ~24× on a single query at `padded_dim = 512`:
-
-```python
-# Before: Python loop over n/(2h) slices per level → O(d) dispatches
-while h < n:
-    for i in range(0, n, h * 2):
-        a = x[..., i : i + h].copy()
-        b = x[..., i + h : i + 2 * h]
-        x[..., i : i + h]       = a + b
-        x[..., i + h : i + 2 * h] = a - b
-    h *= 2
-
-# After: reshape view → one pair of ops per level → O(log d) dispatches
-while h < n:
-    view = x.reshape(*x.shape[:-1], n // (2 * h), 2, h)
-    a = view[..., 0, :].copy()
-    view[..., 0, :] += view[..., 1, :]      # view[0] ← a + b
-    view[..., 1, :]  = a - view[..., 1, :]  # view[1] ← a - b
-    h *= 2
-```
-
-`reshape` returns a view only when the array is C-contiguous, so writes
-to `view` propagate back to `x` — no extra allocation per level beyond
-the single `a.copy()`. In the RHT pipeline we enforce this explicitly
-(via `np.ascontiguousarray` at the call site and a defensive assert
-inside `_fwht_inplace`); `.astype` alone does not guarantee C-order
-when the input is Fortran-contiguous.
-
-#### Step 3 — Lloyd-Max scalar quantization
-
-The optimal scalar quantizer for N(0,1) at b bits partitions ℝ into 2^b intervals
-and assigns each the conditional mean as reconstruction value.
-These boundaries and centroids are precomputed and hardcoded in `snapvec._codebooks`
-(no scipy required at runtime):
-
-| bits | levels | distortion (MSE) | bytes/coord |
-|------|--------|------------------|-------------|
-| 2    | 4      | 0.1175           | 0.25        |
-| 3    | 8      | 0.0311           | 0.375       |
-| 4    | 16     | 0.0077           | 0.50        |
-
-The quantized vector is stored as a `uint8` index matrix, tightly
-bit-packed to `b/8` bytes per coordinate both on disk and in RAM. For 3-bit
-this means packing 8 indices into 3 bytes (24 bits); for 2-bit and 4-bit
-the packing is byte-aligned (4 per byte, 2 per byte respectively).
-
-#### Step 4 — Approximate inner product
-
-At search time the query `q` is rotated (not quantized) and the approximate
-cosine similarity is computed as:
-
-```
-score(q, v) = (1/d') · Σᵢ centroid[idx_qᵢ] · centroid[idx_vᵢ]
-```
-
-This is a single float16 matrix–vector product against the cached centroid expansions.
-
----
-
-### TurboQuant_prod: unbiased estimator with QJL correction
-
-The MSE quantizer introduces a small systematic downward bias. The `use_prod=True` mode
-corrects this using a **Quantized Johnson-Lindenstrauss (QJL)** residual:
-
-**Build time (per stored vector):**
-
-1. Quantize at `(b-1)` bits MSE, compute residual `r = x̃ - x̃_MSE`
-2. Store `sign(S·r)` as a 1-bit vector (int8 ±1 in practice),
-   where `S ∈ ℝ^(d'×d')` is a fixed random Gaussian matrix
-3. Store `‖r‖ / √d'` (one float32 per vector)
-
-**Query time (correction term):**
-
-```
-correctionᵢ = √(π/2) / d' · ‖rᵢ‖ · dot(S·q̂, sign(S·rᵢ))
-final_scoreᵢ = mse_scoreᵢ + correctionᵢ
-```
-
-This follows from Lemma 4 of Zandieh et al. (2025):
-`E[sign(S·r)] = √(2/π) · S·r / ‖S·r‖`, giving an unbiased estimate of `⟨r, q̂⟩`.
-
-**When to use `use_prod=True`:**
-- When you need accurate inner product magnitudes (KV-cache, attention approximation)
-- **Not** recommended for pure ranking/NNS — the added QJL variance degrades recall@k
-  relative to MSE-only at equal total bits
-
----
-
-### Compression ratios
-
-Measured on `d = 384` (BGE-small); the RHT pads to the next power of 2 so
-`padded_dim = 512`. All per-vector byte counts below include the padded
-dimensions — they are the numbers you actually pay in RAM and on disk.
-The trailing `+ 4` is the float32 norm; in `normalized=True` mode it is
-still persisted (as 1.0) to keep the on-disk layout stable across modes.
-
-| Backend        | Bytes/vec (disk) | Bytes/vec (RAM, idle) | Disk ratio | RAM ratio |
-|----------------|------------------|-----------------------|------------|-----------|
-| float32        | 1 536            | 1 536                 | 1.0×       | 1.0×      |
-| 4-bit snapvec  | 256 + 4          | 256 + 4               | **5.9×**   | **5.9×**  |
-| 3-bit snapvec  | 192 + 4          | 192 + 4               | **7.8×**   | **7.8×**  |
-| 2-bit snapvec  | 128 + 4          | 128 + 4               | **11.6×**  | **11.6×** |
-| int8 (naïve)   | 384 + 4          | 384 + 4               | 4.0×       | 4.0×      |
-
-**RAM = disk:** indices are tightly bit-packed in both. The same byte
-layout is used everywhere, so `save` / `load` copy bytes directly without
-an intermediate unpack/repack step. This halves indices RAM vs the
-pre-v0.2 behaviour (which stored uint8 in RAM and only packed on disk).
-
-Bit-packing scheme:
-- **4-bit** (`0.5 bytes/coord`): 2 indices per byte (byte-aligned).
-- **3-bit** (`0.375 bytes/coord`): 8 indices → 3 bytes, cross-byte tight
-  packing (v3 file format; v1/v2 files are read transparently via the
-  legacy byte-aligned decoder).
-- **2-bit** (`0.25 bytes/coord`): 4 indices per byte (byte-aligned).
-
-Unpacking happens when the `float16` centroid cache is built (cached
-full-scan path — once, off the hot matmul) or per-chunk/per-query in
-`chunk_size` / `filter_ids` modes.
-
-**Search cache:** a lazy `float16` centroid expansion of shape
-`(N, padded_dim)` is materialised on first query for fast matmul (~5 ms
-at N = 100 k). It is evicted on writes and can be avoided entirely via
-`chunk_size` for memory-constrained deployments.
-
-#### Real-world footprint: 1 M vectors at d = 768
-
-Typical for BGE-base, E5-base, `nomic-embed-text-v1`, and other 768-dim
-models. The RHT pads to 1024.
-
-| Backend        | Idle RAM | + cache (float16) | Warm peak |
-|----------------|----------|--------------------|-----------|
-| float32        | **2.86 GiB** | — | 2.86 GiB |
-| int8 (naïve)   | 0.72 GiB | — | 0.72 GiB |
-| 4-bit snapvec  | **0.48 GiB** | +1.91 GiB | 2.39 GiB |
-| 3-bit snapvec  | **0.36 GiB** | +1.91 GiB | 2.27 GiB |
-| 2-bit snapvec  | **0.24 GiB** | +1.91 GiB | 2.15 GiB |
-
-Numbers use binary units (1 GiB = 2³⁰ bytes); e.g. float32 is
-`1M × 768 × 4 B = 2.86 GiB`.
-
-The cache is materialised only during active search and is evicted on
-any write. With `chunk_size` set, warm peak drops to roughly
-`idle RAM + chunk_size × padded_dim × 2 B` (the per-chunk float16
-scratch) — e.g. `chunk_size=10_000` at `padded_dim=1024` adds ~20 MiB,
-at the cost of ~10× query latency. This is the usual memory/latency
-trade-off, exposed as a first-class flag.
-
-For a single-server RAG index at this scale, 4-bit snapvec idles at
-**half a GiB** where float32 idles at ~3 GiB.
-
----
-
-### Recall benchmarks
-
-Measured on synthetic unit-sphere vectors (`d=384`, `N=10 000`, 100 queries).
-**Baseline: exact cosine float32 brute-force.**
-
-| bits | recall@1 | recall@10 | recall@50 |
-|------|----------|-----------|-----------|
-| 2    | 0.72     | 0.83      | 0.91      |
-| 3    | 0.81     | 0.91      | 0.96      |
-| 4    | 0.86     | 0.93      | 0.95      |
-
-Recall improves with clustered (real-world) data. On BGE-small-en embeddings
-from mixed document corpora, 4-bit achieves **recall@10 ≈ 0.95**.
-
-> **Note on published results:** The TurboQuant paper (Zandieh et al., 2025) reports
-> recall up to 0.99, measured against HNSW graph navigation (not brute-force float32),
-> on GloVe `d=200` data, using recall@1 with large `k_probe`. These conditions differ
-> from the above; both results are correct under their respective definitions.
-
----
-
-### File format (`.snpv`)
-
-```
-Offset  Size   Field
-──────────────────────────────────────────────────
-0       4 B    magic: "SNPV"
-4       4 B    version: uint32 (1, 2, or 3)
-8       4 B    dim: uint32  — original embedding dimension
-12      4 B    bits: uint32 — total bits (2, 3, or 4)
-16      4 B    seed: uint32 — rotation seed
-20      4 B    n: uint32    — number of stored vectors
-24      4 B    flags: uint32 — bit-0: use_prod, bit-1: normalized  [v2/v3 only]
-──────────────────────────────────────────────────
-28      4 B    packed_len: uint32
-32      *      indices: bit-packed uint8 MSE indices
-       n×4 B   norms: float32 per-vector original norms
-[prod only]
-       n×d' B  qjl_signs: int8 sign(S·r) per vector
-       n×4 B   rnorms: float32 ‖r‖/√d per vector
-──────────────────────────────────────────────────
-       n×(2+L) ids: uint16-length-prefixed UTF-8 strings
-```
-
-Saves are **atomic** on POSIX: writes to `.snpv.tmp` then `os.replace()`.
-Backward compatible: v1 (mse-only, pre-flags), v2 (flags + byte-aligned
-3-bit), and v3 (tight 3-bit packing) files all load correctly — the
-reader dispatches the 3-bit decoder on version.
-
----
-
-## API reference
-
-### `SnapIndex(dim, bits=4, seed=0, use_prod=False, chunk_size=None, normalized=False)`
-
-| Parameter     | Type       | Default | Description |
-|---------------|------------|---------|-------------|
-| `dim`         | int        | —       | Embedding dimension |
-| `bits`        | int        | 4       | Bits per coordinate: 2, 3, or 4 |
-| `seed`        | int        | 0       | Rotation seed — must be consistent across build and query |
-| `use_prod`    | bool       | False   | Enable QJL unbiased estimator (requires bits ≥ 3) |
-| `chunk_size`  | int \| None | None    | Stream search in chunks without the float16 cache (for N > 500k) |
-| `normalized`  | bool       | False   | Skip norm computation: trust that input vectors are unit-length |
-
-### Methods
-
-```python
-idx.add(id, vector)                           # Add one vector
-idx.add_batch(ids, vectors)                   # Add N vectors (~50x faster than loop)
-idx.delete(id) -> bool                        # Remove by id, O(1) lookup
-idx.search(query, k=10, filter_ids=None)      # [(id, score), ...] descending
-idx.save(path)                                # Atomic binary save to .snpv
-SnapIndex.load(path)                          # Load from .snpv file
-idx.stats() -> dict                           # Compression / memory diagnostics
-len(idx)                                      # Number of stored vectors
-repr(idx)                                     # SnapIndex(dim=384, bits=4, mode=mse, n=1000)
-```
-
-> **All vector inputs should be `np.float32`.** Passing `float64` triggers
-> a full-size temporary cast inside `add_batch` / `search` (see "Input
-> dtype" in Quick start). Most embedding models already return `float32`;
-> only ad-hoc arrays built from Python lists via `np.array(...)` default
-> to `float64`.
-
----
-
-## Relation to TurboQuant / PolarQuant
-
-`snapvec` implements the core compression pipeline from:
-
-> Zandieh, A., Daliri, M., Hadian, A., & Mirrokni, V. (2025).
-> **TurboQuant: Online Vector Quantization with Near-optimal Distortion Rate.**
-> *ICLR 2026.* [arXiv:2504.19874](https://arxiv.org/abs/2504.19874)
-
-The same algorithm was published concurrently as "PolarQuant" at AISTATS 2026.
-Both names were already taken on PyPI; `snapvec` = **Hada**mard + Lloyd-**Max**,
-named after its two core operations.
-
-> **Note on `PQSnapIndex`.**  While `SnapIndex` follows the TurboQuant paper
-> strictly (RHT + Lloyd-Max), `PQSnapIndex` deliberately departs from that
-> pipeline: it skips the RHT and learns per-subspace k-means codebooks on the
-> raw embedding space, which lets it exploit the natural clustered structure
-> of modern LLM embeddings.  The trade-off is that a training-free guarantee
-> is replaced with a one-off `fit(sample)` call — in exchange for a strictly
-> better recall / storage Pareto frontier on the retrieval workloads we've
-> measured.  See the decision table at the top of this README.
-
-Key contributions of this implementation over the reference:
-
-- **No scipy** -- codebooks hardcoded, numpy is the only runtime dependency. Cython kernels compile at install time
-- **Batch WHT** — single O(n·d·log d) call for bulk inserts (~50x faster than loop)
-- **Float16 cache** — centroid expansions in half precision, ~2x faster matmul
-- **Packed RAM indices** — 2/4-bit indices stored bit-packed in RAM (2× less memory),
-  unpacked lazily when the float16 cache is built — zero impact on warm query latency
-- **Pre-filtering** — `filter_ids` restricts search to a subset with O(|filter| · d) cost
-- **Chunked streaming search** — `chunk_size` avoids the float16 cache for large N
-- **O(1) delete** — `_id_to_pos` dict + position compaction
-- **Atomic saves** — `.snpv.tmp` → `os.replace()` pattern
-- **Versioned format** — v1/v2/v3 all loadable, forward-compatible flags field,
-  legacy 3-bit decoder kept around for pre-v0.3 indices
-
----
-
-## Roadmap
-
-### Pure-Python improvements (no new dependencies)
-
-- **Quantized norms on disk** -- store per-vector norms as uint8 with a
-  (min, max) header. Saves 3 bytes/vec on disk with <0.1% precision loss.
-- **Typed ID storage** -- persist integer IDs as fixed-width uint32/uint64
-  instead of UTF-8 strings when all IDs are numeric.
-- **Positional-ID fast path** -- when IDs are `0..N-1`, skip `_ids` list
-  and `_id_to_pos` dict entirely; position is the ID.
-- **API parity** -- `filter_ids` for PQSnapIndex and ResidualSnapIndex
-  (currently only SnapIndex and IVFPQSnapIndex support it).
-
-### Future directions
-
-- **Batch RHT + quantization** -- Cython FWHT + `searchsorted` for
-  `add_batch`. Target: `add_batch(100k, d=384)` 2.5s -> ~200ms.
-  Lowest priority -- indexing is typically amortized offline.
-- **OpenMP tuning** -- the current parallel threshold (n >= 2000) and
-  schedule (static) were chosen empirically on Apple Silicon. Linux
-  and many-core x86 may benefit from dynamic scheduling or different
-  thresholds.
-
-_Previously planned and now shipped:_
-_Tight 3-bit packing (v0.3.0). Vectorized FWHT (v0.3.0). Compiled
-ADC kernels (v0.9.0 via Cython+OpenMP -- originally scoped as Rust
-Phase 1-2, delivered with equivalent performance and simpler build)._
-
-### Non-goals
-
-- **Rust / native extensions beyond Cython**. The v0.9.0 Cython+OpenMP
-  kernels match the performance targets originally scoped for a Rust
-  accelerator, at the cost of one compiled wheel build. Adding a second
-  native backend would duplicate maintenance without clear user benefit.
-- **Trained codebooks (PQ / OPQ / RaBitQ-trained)** for SnapIndex. Keeps
-  the "no training required" guarantee; the data-agnostic Lloyd-Max
-  tables make SnapIndex safe to use without a representative sample.
-  (PQSnapIndex and IVFPQSnapIndex do use trained codebooks by design.)
-- **Graph indices (HNSW / NSG)**. Different trade-off space; snapvec
-  targets flat and inverted-file indices where compression and
-  predictable latency matter more than sub-linear graph traversal.
-- **GPU acceleration**. The compiled ADC path is compute-bound on CPU
-  at current scales; GPU would help only at very large N where
-  network/transfer cost already dominates.
-
----
-
-## Changelog
-
-See [`CHANGELOG.md`](./CHANGELOG.md) for the per-release history. Recent
-highlights:
-
-- **v0.9.0** -- Cython+OpenMP compiled ADC kernels. 5.8x faster at recall 0.977 on FIQA. Zero extra runtime dependencies.
-- **v0.8.0** -- Thread-safe search via `freeze()`, `filter_ids` for IVFPQSnapIndex.
-- **v0.7.0** -- CRC32 trailers on all file formats, fp16 rerank cache (half storage).
-- **v0.6.0** -- Float32 rerank pass breaks the PQ recall ceiling (0.929 -> 0.994).
-- **v0.5.0** -- IVFPQSnapIndex with sub-linear search, 12x faster build at N=1M.
-- **v0.3.0** -- Tight 3-bit packing (7.8x compression), vectorised FWHT.
-
-## Installation
-
-```bash
-pip install snapvec
-```
-
-**Requirements:** Python >= 3.10, NumPy >= 1.24. No other runtime dependencies.
-Pre-built wheels will be available for common platforms (macOS, Linux x86_64,
-Windows) via `pip install`; building from source requires a C compiler for the
-Cython extension.
-
-For development:
-
-```bash
-git clone https://github.com/stffns/snapvec
-cd snapvec
-pip install -e ".[dev]"
-python setup.py build_ext --inplace   # compile Cython kernels
-pytest tests/ -v
-```
-
-On macOS, `brew install libomp` enables OpenMP parallel scoring.
-On Linux, OpenMP support is typically available via gcc out of the box.
-
----
+Runnable end-to-end scripts for every index live in
+[`examples/`](examples/).
+
+## Documentation
+
+Full docs: **<https://stffns.github.io/snapvec/>**
+
+- [Installation](https://stffns.github.io/snapvec/getting-started/installation/)
+- [Choosing an index](https://stffns.github.io/snapvec/user-guide/choosing-an-index/)
+- [Architecture](https://stffns.github.io/snapvec/architecture/) (RHT, Lloyd-Max, PQ, IVF)
+- [Benchmarks](https://stffns.github.io/snapvec/benchmarks/)
+- [API reference](https://stffns.github.io/snapvec/api/snap-index/)
+
+## Context
+
+`snapvec` was developed as the quantization layer for
+[vstash](https://github.com/stffns/vstash), a local-first hybrid retrieval
+system, to extend it to corpora beyond the float32 memory budget while
+preserving its dependency-minimal design. It stands alone as a
+quantization library, but the design constraints (NumPy-only base
+install, predictable latency, reproducible index files) come from
+vstash's local-first requirements.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, the test matrix,
+and the release process. Bugs and feature requests go to
+[issues](https://github.com/stffns/snapvec/issues); questions and
+usage help to [discussions](https://github.com/stffns/snapvec/discussions).
 
 ## License
 
-MIT © 2025 Jayson Steffens.
+MIT (c) 2025 Jayson Steffens.
 
-The TurboQuant algorithm is described in [arXiv:2504.19874](https://arxiv.org/abs/2504.19874)
-by Zandieh et al. (Google Research / ICLR 2026). This package is an independent implementation.
+The TurboQuant algorithm is described in
+[arXiv:2504.19874](https://arxiv.org/abs/2504.19874) by Zandieh et al.
+(Google Research / ICLR 2026). This package is an independent
+implementation.
