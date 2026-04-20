@@ -43,51 +43,63 @@ story, use sqlite-vec or FAISS `IndexFlatIP`.
 
 | Backend | recall@10 | p50 us | p99 us | disk MB | build s |
 |---------|----------:|-------:|-------:|--------:|--------:|
-| sqlite-vec (brute-force cosine, exact) | **1.000** | 13757 | 17539 | 91.1 | 0.5 |
-| hnswlib (M=32, ef_search=128) | 0.994 | 507 | 823 | 104.5 | 43 |
-| **snapvec IVFPQ + fp16 rerank (M=192)** | **0.945** | **346** | 417 | 56.9 | 107 |
-| FAISS IVFPQ (M=192) [matched-budget] | 0.906 | 484 | 2116 | 12.7 | 17 |
-| **snapvec IVFPQ no rerank (M=192)** | 0.895 | **319** | 392 | 12.6 | 108 |
-| snapvec SnapIndex 4-bit scalar (full-scan) | 0.854 | 2727 | 4152 | 15.4 | 1.1 |
-| snapvec SnapIndex 3-bit scalar (full-scan) | 0.736 | 2717 | 2965 | 11.7 | 0.8 |
-| FAISS IVFPQ (M=48) | 0.603 | 143 | 194 | 4.4 | 10 |
-| snapvec SnapIndex 2-bit scalar (full-scan) | 0.618 | 2649 | 3127 | 8.0 | 0.7 |
-| snapvec IVFPQ no rerank (M=48) [matched-budget] | 0.549 | 269 | 342 | 4.3 | 33 |
+| sqlite-vec (brute-force cosine, exact) | **1.000** | 13891 | 18628 | 91.1 | 0.5 |
+| hnswlib (M=32, ef_search=128) | 0.994 | 561 | 994 | 104.5 | 45 |
+| **snapvec IVFPQ + fp16 rerank (M=192)** | **0.945** | **359** | 457 | 56.9 | 108 |
+| FAISS IVFPQ (M=192) [matched-budget] | 0.906 | 483 | 584 | 12.7 | 17 |
+| **snapvec IVFPQ no rerank (M=192)** | 0.895 | **325** | 376 | 12.6 | 110 |
+| snapvec SnapIndex 4-bit scalar (full-scan) | 0.854 | 2676 | 3164 | 15.4 | 1.1 |
+| snapvec SnapIndex 3-bit scalar (full-scan) | 0.736 | 2688 | 3013 | 11.7 | 0.8 |
+| snapvec SnapIndex 2-bit scalar (full-scan) | 0.618 | 2726 | 4016 | 8.0 | 0.7 |
+| FAISS IVFPQ (M=48) | 0.603 | 142 | 200 | 4.4 | 10 |
+| snapvec IVFPQ no rerank (M=48) [matched-budget] | 0.549 | 267 | 350 | 4.3 | 33 |
 
 Rows ordered by recall@10 descending.
+
+**Methodology.** All numbers come from a single end-to-end invocation
+of `experiments/bench_competitive.py`.  The orchestrator spawns one
+subprocess per backend (each backend bundles its own libomp; loading
+two into the same Python process crashes on macOS arm64) but all four
+subprocesses run back-to-back in one session so OS page-cache state
+does not drift between earlier and later rows.  An earlier
+multi-session measurement showed a ~56% p50 delta on SnapIndex between
+cold and warm runs; the single-invocation convention above eliminates
+that.
 
 Thread pinning: `faiss.omp_set_num_threads(1)` + `idx.set_num_threads(1)`
 on the hnswlib instance (set before `add_items`) for apples-to-apples
 build and search timings.  snapvec's `fit` still uses whatever NumPy
 BLAS is configured to; for this machine `np.show_config()` reports
-Accelerate with its default thread count.
+Accelerate with its default thread count.  Expected run-to-run noise
+on this hardware is <=5% p50 for every row except hnswlib, which
+hits ~10-15% routinely.
 
 ### Reading the table
 
 The Pareto frontier (no backend strictly dominated) is:
 
 1. **FAISS IVFPQ M=48** owns the aggressive-compression corner --
-   0.603 recall at 4.4 MB and 168 us.  snapvec at the same M budget
+   0.603 recall at 4.4 MB and 142 us.  snapvec at the same M budget
    is slower AND has lower recall, so at that ultra-compressed point
    FAISS wins outright.
 2. **snapvec IVFPQ M=192** matches FAISS M=192 on disk (12.6 vs
-   12.7 MB) and on recall (0.895 vs 0.906) while being **1.4x faster**
-   at p50 (336 vs 475 us).  This is the matched-budget headline.
+   12.7 MB) and on recall (0.895 vs 0.906) while being **1.5x faster**
+   at p50 (325 vs 483 us).  This is the matched-budget headline.
 3. **snapvec IVFPQ + fp16 rerank** is the Pareto-dominant high-recall
-   point under 500 us: 0.945 recall at 355 us -- faster than FAISS
+   point under 500 us: 0.945 recall at 359 us -- faster than FAISS
    M=192 AND higher recall, at the cost of a 4.5x larger index file
    (holds a float16 copy for the rerank pass).
 4. **hnswlib** reaches the highest non-exact recall (0.994) but pays
-   with disk (104 MB) and p99 latency (819 us).
+   with disk (104 MB) and p99 latency (994 us).
 5. **sqlite-vec** is exact (recall 1.000) but its brute-force
-   cosine scan is 13 ms -- ~40x slower than any of the ANN backends
+   cosine scan is 13.9 ms -- ~40x slower than any of the ANN backends
    on this N.  It's the 'zero ANN tuning, accept the latency' baseline.
 
 ### Positioning in plain language
 
 - If you need **one dependency, no training, acceptable latency on
   small N**: `SnapIndex` at 4-bit scalar or sqlite-vec.  snapvec is
-  ~5x faster (2.7 ms vs 13.8 ms) but gives up exactness (0.85 vs
+  ~5x faster (2.7 ms vs 13.9 ms) but gives up exactness (0.85 vs
   1.00 recall) because it quantizes the vectors.  `SnapIndex` p50
   latency is essentially constant across bit depths (the fp16
   centroid-expansion matmul dominates); the recall/disk tradeoff is
@@ -104,8 +116,8 @@ The Pareto frontier (no backend strictly dominated) is:
 
 ### Caveats
 
-- FAISS `fit` is ~7x faster than snapvec's `fit` at the same config
-  (16 s vs 112 s at M=192).  Build time is a real competitive gap.
+- FAISS `fit` is ~6.5x faster than snapvec's `fit` at the same config
+  (17 s vs 110 s at M=192).  Build time is a real competitive gap.
 - FAISS IVFPQ at M=48 beats snapvec at M=48; snapvec's PQ training
   isn't uniformly better at every compression point.  The advantage
   shows up at mid-range (M=96-192).
