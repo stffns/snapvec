@@ -320,10 +320,12 @@ def run_hnswlib() -> list[dict]:
         M=HNSW_M,
         random_seed=0,
     )
+    # Pin single-thread BEFORE add_items so the reported build_s is
+    # single-thread too (FAISS is also 1-thread via omp_set_num_threads).
+    idx.set_num_threads(1)
     t0 = perf_counter()
     idx.add_items(corpus, np.arange(len(corpus)))
     idx.set_ef(HNSW_EF_SEARCH)
-    idx.set_num_threads(1)
     build = perf_counter() - t0
 
     pred = np.empty((len(queries), K), dtype=np.int64)

@@ -46,6 +46,12 @@ corpus -- recall@10 is against exact NN.
 
 Rows ordered by recall@10 descending.
 
+Thread pinning: `faiss.omp_set_num_threads(1)` + `idx.set_num_threads(1)`
+on the hnswlib instance (set before `add_items`) for apples-to-apples
+build and search timings.  snapvec's `fit` still uses whatever NumPy
+BLAS is configured to; for this machine `np.show_config()` reports
+Accelerate with its default thread count.
+
 ### Reading the table
 
 The Pareto frontier (no backend strictly dominated) is:
