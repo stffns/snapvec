@@ -5,13 +5,36 @@ process.
 
 ## What's safe
 
-- Multiple threads calling `search()` on the **same** index concurrently.
-  Search paths allocate their own scratch buffers and only read shared
-  state, so no external lock is required.
+- Multiple threads calling `search()` on the **same** index concurrently,
+  **after** `freeze()` (see below).  Search paths allocate their own
+  scratch buffers and, once the index is frozen, only read shared state.
 - Multiple processes opening **different** index files and querying
   them independently.
 - A single writer and any number of readers, as long as you never
   overlap a writer with a reader on the same instance.
+
+## Freeze before sharing across threads
+
+`SnapIndex.search()` lazily materialises an internal float16 centroid
+cache on the first query.  If two threads both issue their *first*
+search concurrently, they race on that cache assignment -- concurrent
+`search()` is only safe once the cache exists.
+
+The library exposes `freeze()` precisely to pre-warm that state:
+
+```python
+idx = SnapIndex(dim=384, bits=4)
+idx.add_batch(ids, vectors)
+idx.freeze()          # pre-warms the cache, makes concurrent search safe
+
+# Now you can hand idx to multiple reader threads.
+```
+
+After `freeze()`, mutations (`add_batch`, `delete`) raise, so freeze
+also doubles as an "I'm done writing" signal.  `PQSnapIndex`,
+`IVFPQSnapIndex`, and `ResidualSnapIndex` have the same contract:
+call `freeze()` -- or at least issue one warm-up `search()` on the
+main thread -- before fanning out.
 
 ## What's not safe
 
