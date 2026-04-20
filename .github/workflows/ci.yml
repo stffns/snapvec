@@ -65,6 +65,20 @@ jobs:
       - name: Run tests
         run: pytest -q --cov=snapvec --cov-report=term-missing
 
+      - name: Run examples smoke test
+        shell: bash
+        run: |
+          set -e
+          for ex in examples/quickstart.py \
+                    examples/pq_index.py \
+                    examples/ivf_pq.py \
+                    examples/filter_search.py \
+                    examples/save_load.py \
+                    examples/streaming_ingest.py; do
+            echo "=== $ex ==="
+            python "$ex"
+          done
+
       - name: Upload coverage (ubuntu + py3.12 only)
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
         uses: actions/upload-artifact@v4
