@@ -31,7 +31,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from ._codebooks import get_codebook
-from ._file_format import save_with_checksum_atomic, verify_checksum
+from ._file_format import ChecksumWriter, save_with_checksum_atomic, verify_checksum
 from ._freezable import FreezableIndex
 from ._rotation import padded_dim, rht
 
@@ -148,8 +148,8 @@ class ResidualSnapIndex(FreezableIndex):
             batch_norms = None  # not stored in normalized mode
         else:
             raw_norms = np.linalg.norm(arr, axis=1)
-            safe = np.where(raw_norms > 1e-10, raw_norms, 1.0)
-            units = arr / safe[:, None]
+            safe = np.where(raw_norms > 1e-10, raw_norms, 1.0).astype(np.float32)
+            units = (arr / safe[:, None]).astype(np.float32)
             batch_norms = np.where(raw_norms > 1e-10, raw_norms, 0.0).astype(np.float32)
 
         pdim = self._pdim
@@ -289,7 +289,7 @@ class ResidualSnapIndex(FreezableIndex):
             flags |= 1
         n = len(self._ids)
 
-        def _write(f):
+        def _write(f: "ChecksumWriter") -> None:
             f.write(_MAGIC)
             f.write(struct.pack("<IIIIIIII", _VERSION, self.dim, self.b1,
                                 self.b2, self.seed, n, flags, self._pdim))

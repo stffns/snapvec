@@ -10,6 +10,7 @@ indexes use at query time to match the metric used during training.
 """
 from __future__ import annotations
 
+from typing import cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -88,7 +89,7 @@ def assign_l2(
 ) -> NDArray[np.int64]:
     """Hard-assign every row in X to its nearest centroid (squared L2)."""
     d2 = (X ** 2).sum(1, keepdims=True) - 2 * X @ C.T + (C ** 2).sum(1)[None, :]
-    return d2.argmin(1)
+    return cast("NDArray[np.int64]", d2.argmin(1))
 
 
 def probe_scores_l2_monotone(
@@ -107,7 +108,10 @@ def probe_scores_l2_monotone(
     probe time gives slightly lower recall, especially with uneven
     cluster sizes.
     """
-    return 2.0 * (coarse @ q) - (coarse ** 2).sum(1)
+    return cast(
+        "NDArray[np.float32]",
+        2.0 * (coarse @ q) - (coarse ** 2).sum(1),
+    )
 
 
 __all__ = [

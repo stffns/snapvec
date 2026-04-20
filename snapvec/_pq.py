@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import struct
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -35,8 +35,8 @@ from numpy.typing import NDArray
 try:
     from ._fast import adc_colmajor
 except ImportError:
-    from ._fast_fallback import adc_colmajor  # type: ignore[assignment]
-from ._file_format import save_with_checksum_atomic, verify_checksum
+    from ._fast_fallback import adc_colmajor
+from ._file_format import ChecksumWriter, save_with_checksum_atomic, verify_checksum
 from ._freezable import FreezableIndex
 from ._kmeans import kmeans_mse
 from ._rotation import padded_dim, rht
@@ -150,8 +150,8 @@ class PQSnapIndex(FreezableIndex):
             units = arr
         else:
             raw = np.linalg.norm(arr, axis=1)
-            safe = np.where(raw > 1e-10, raw, 1.0)
-            units = arr / safe[:, None]
+            safe = np.where(raw > 1e-10, raw, 1.0).astype(np.float32)
+            units = (arr / safe[:, None]).astype(np.float32)
             norms = np.where(raw > 1e-10, raw, 0.0).astype(np.float32)
 
         if self.use_rht:
@@ -180,7 +180,7 @@ class PQSnapIndex(FreezableIndex):
         padded[: self.dim] = q_unit
         rot = rht(padded[None, :], self.seed)[0]
         rot /= np.linalg.norm(rot) + 1e-12
-        return rot.astype(np.float32)
+        return cast("NDArray[np.float32]", rot.astype(np.float32))
 
     # ──────────────────────────────────────────────────────────────── #
     # training                                                          #
@@ -372,7 +372,7 @@ class PQSnapIndex(FreezableIndex):
             flags |= _FLAG_USE_RHT
         n = len(self._ids)
 
-        def _write(f):
+        def _write(f: "ChecksumWriter") -> None:
             f.write(_MAGIC)
             f.write(
                 struct.pack(

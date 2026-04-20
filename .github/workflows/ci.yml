@@ -31,8 +31,8 @@ jobs:
       - name: ruff check
         run: ruff check snapvec/ tests/
 
-      - name: mypy (strict, warning-only for now)
-        run: mypy --strict snapvec/ || true
+      - name: mypy --strict
+        run: mypy --strict snapvec/
 
   test:
     name: Test ${{ matrix.os }} / py${{ matrix.python-version }}

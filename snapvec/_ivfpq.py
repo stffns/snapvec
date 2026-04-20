@@ -34,7 +34,7 @@ import threading
 import warnings
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -42,8 +42,8 @@ from numpy.typing import NDArray
 try:
     from ._fast import fused_gather_adc
 except ImportError:
-    from ._fast_fallback import fused_gather_adc  # type: ignore[assignment]
-from ._file_format import save_with_checksum_atomic, verify_checksum
+    from ._fast_fallback import fused_gather_adc
+from ._file_format import ChecksumWriter, save_with_checksum_atomic, verify_checksum
 from ._freezable import FreezableIndex
 from ._kmeans import assign_l2, kmeans_mse, probe_scores_l2_monotone
 from ._rotation import padded_dim, rht
@@ -217,8 +217,8 @@ class IVFPQSnapIndex(FreezableIndex):
             norms = np.empty(0, dtype=np.float32)
         else:
             raw = np.linalg.norm(arr, axis=1)
-            safe = np.where(raw > 1e-10, raw, 1.0)
-            units = arr / safe[:, None]
+            safe = np.where(raw > 1e-10, raw, 1.0).astype(np.float32)
+            units = (arr / safe[:, None]).astype(np.float32)
             norms = np.where(raw > 1e-10, raw, 0.0).astype(np.float32)
         if self.use_rht:
             padded = np.zeros((len(arr), self._pdim), dtype=np.float32)
@@ -240,7 +240,7 @@ class IVFPQSnapIndex(FreezableIndex):
         padded[: self.dim] = q_unit
         rot = rht(padded[None, :], self.seed)[0]
         rot /= np.linalg.norm(rot) + 1e-12
-        return rot.astype(np.float32)
+        return cast("NDArray[np.float32]", rot.astype(np.float32))
 
     def _require_fitted(self) -> None:
         if not self._fitted:
@@ -979,7 +979,7 @@ class IVFPQSnapIndex(FreezableIndex):
             flags |= _FLAG_KEEP_FULL_PRECISION
         n = len(self._ids_by_row)
 
-        def _write(f):
+        def _write(f: "ChecksumWriter") -> None:
             f.write(_MAGIC)
             f.write(
                 struct.pack(
