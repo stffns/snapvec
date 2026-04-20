@@ -406,6 +406,8 @@ class SnapIndex(FreezableIndex):
         materialising the full float16 cache.  This trades peak RAM for
         additional compute — useful when N > ~500k vectors.
         """
+        if k < 1:
+            raise ValueError(f"k must be >= 1; got {k}")
         if not self._ids:
             return []
 
