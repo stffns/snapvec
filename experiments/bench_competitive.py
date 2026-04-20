@@ -122,12 +122,36 @@ def disk_size(save_fn) -> int:
 
 
 def run_snapvec() -> list[dict]:
-    from snapvec import IVFPQSnapIndex, __version__ as snapvec_version
+    from snapvec import IVFPQSnapIndex, SnapIndex, __version__ as snapvec_version
 
     corpus, queries = load_fiqa()
     truth = brute_topk(queries, corpus, K)
     dim = corpus.shape[1]
     results = []
+
+    # SnapIndex: training-free scalar quantization, full-scan.
+    # Included as the "no fit, no IVF, zero deps" baseline -- the
+    # simplest snapvec mode, which competes with brute-force float32.
+    flat = SnapIndex(dim=dim, bits=4, normalized=True, seed=0)
+    t0 = perf_counter()
+    flat.add_batch(list(range(len(corpus))), corpus)
+    flat.freeze()  # pre-warm fp16 cache so single-query latency is hot
+    build_flat = perf_counter() - t0
+    pred_flat = np.array([
+        [i for i, _ in flat.search(q, k=K)] for q in queries
+    ])
+    p50_flat, p99_flat = time_per_query(
+        lambda q: flat.search(q, k=K), queries,
+    )
+    disk_flat = disk_size(lambda p: flat.save(p))
+    results.append(dict(
+        name="snapvec SnapIndex flat (bits=4, full-scan)",
+        recall=recall_at_k(pred_flat, truth, K),
+        p50_us=p50_flat, p99_us=p99_flat,
+        disk_bytes=disk_flat, build_s=build_flat,
+        notes="no training, no IVF",
+        library_version=snapvec_version,
+    ))
 
     # flagship: rerank on
     idx = IVFPQSnapIndex(
@@ -156,31 +180,90 @@ def run_snapvec() -> list[dict]:
         library_version=snapvec_version,
     ))
 
-    # pure PQ
-    idx2 = IVFPQSnapIndex(
-        dim=dim, nlist=NLIST, M=SNAPVEC_M, K=PQ_K,
-        normalized=True, seed=0,
+    # pure PQ, matched to FAISS at both M operating points so the
+    # two-vs-two comparison is clean.
+    for m in (SNAPVEC_M, FAISS_M):
+        idx2 = IVFPQSnapIndex(
+            dim=dim, nlist=NLIST, M=m, K=PQ_K,
+            normalized=True, seed=0,
+        )
+        t0 = perf_counter()
+        idx2.fit(corpus, kmeans_iters=15)
+        idx2.add_batch(list(range(len(corpus))), corpus)
+        build_m = perf_counter() - t0
+        pred_m = np.array([
+            [i for i, _ in idx2.search(q, k=K, nprobe=NPROBE)] for q in queries
+        ])
+        p50_m, p99_m = time_per_query(
+            lambda q: idx2.search(q, k=K, nprobe=NPROBE), queries,
+        )
+        disk_m = disk_size(lambda p: idx2.save(p))
+        idx2.close()
+        tag = "[matched-budget vs FAISS]" if m == FAISS_M else ""
+        results.append(dict(
+            name=f"snapvec IVFPQ no rerank (M={m}, nprobe={NPROBE})",
+            recall=recall_at_k(pred_m, truth, K),
+            p50_us=p50_m, p99_us=p99_m, disk_bytes=disk_m, build_s=build_m,
+            notes=f"PQ only {tag}".strip(),
+            library_version=snapvec_version,
+        ))
+    return results
+
+
+def run_sqlite_vec() -> list[dict]:
+    """sqlite-vec baseline -- brute-force cosine via vec0 virtual table.
+
+    Included because this is vstash's current backend and the most
+    common 'pip-install-one-thing' alternative for local RAG."""
+    import sqlite3
+    import sqlite_vec
+    from importlib.metadata import version as _pkg_version
+
+    corpus, queries = load_fiqa()
+    truth = brute_topk(queries, corpus, K)
+    dim = corpus.shape[1]
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = Path(f.name)
+    conn = sqlite3.connect(db_path)
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.execute(
+        f"CREATE VIRTUAL TABLE vecs USING vec0(emb float[{dim}])"
     )
     t0 = perf_counter()
-    idx2.fit(corpus, kmeans_iters=15)
-    idx2.add_batch(list(range(len(corpus))), corpus)
-    build2 = perf_counter() - t0
-    pred2 = np.array([
-        [i for i, _ in idx2.search(q, k=K, nprobe=NPROBE)] for q in queries
-    ])
-    p50_2, p99_2 = time_per_query(
-        lambda q: idx2.search(q, k=K, nprobe=NPROBE), queries,
-    )
-    disk2 = disk_size(lambda p: idx2.save(p))
-    idx2.close()
-    results.append(dict(
-        name=f"snapvec IVFPQ no rerank (M={SNAPVEC_M}, nprobe={NPROBE})",
-        recall=recall_at_k(pred2, truth, K),
-        p50_us=p50_2, p99_us=p99_2, disk_bytes=disk2, build_s=build2,
-        notes="PQ only",
-        library_version=snapvec_version,
-    ))
-    return results
+    with conn:
+        conn.executemany(
+            "INSERT INTO vecs(rowid, emb) VALUES (?, ?)",
+            [(i, v.tobytes()) for i, v in enumerate(corpus)],
+        )
+    build = perf_counter() - t0
+
+    def _search(q: NDArray[np.float32]) -> list[int]:
+        rows = conn.execute(
+            "SELECT rowid FROM vecs "
+            "WHERE emb MATCH ? ORDER BY distance LIMIT ?",
+            (q.tobytes(), K),
+        ).fetchall()
+        return [r[0] for r in rows]
+
+    pred = np.array([_search(q) for q in queries])
+    p50, p99 = time_per_query(_search, queries)
+    disk = db_path.stat().st_size
+    conn.close()
+    db_path.unlink(missing_ok=True)
+
+    try:
+        sv_version = _pkg_version("sqlite-vec")
+    except Exception:
+        sv_version = "unknown"
+    return [dict(
+        name="sqlite-vec (brute-force cosine)",
+        recall=recall_at_k(pred, truth, K),
+        p50_us=p50, p99_us=p99, disk_bytes=disk, build_s=build,
+        notes="exact; no ANN",
+        library_version=sv_version,
+    )]
 
 
 def run_faiss() -> list[dict]:
@@ -294,12 +377,28 @@ def run_backend_subprocess(backend: str) -> list[dict]:
 
 
 def main_orchestrator() -> None:
-    print(f"Hardware: {platform.platform()}")
+    ram_bytes = 0
+    if sys.platform == "darwin":
+        try:
+            ram_bytes = int(
+                subprocess.check_output(["sysctl", "-n", "hw.memsize"])
+                .decode().strip()
+            )
+        except Exception:
+            pass
+    cpu_count = os.cpu_count() or 0
+
+    print(f"Hardware: {platform.platform()}  "
+          f"CPU count: {cpu_count}  "
+          f"RAM: {ram_bytes / (1024**3):.0f} GB")
     print(f"Python {platform.python_version()}  numpy {np.__version__}")
+    print(f"Dataset: BEIR FIQA, N={N_QUERY_SAMPLE} queries (of 648), "
+          f"full corpus N=57,638, dim=384 (BGE-small, unit-normalised)")
+    print("Ground truth: float32 brute-force top-10 dot product on unit vectors")
     print()
 
     all_rows: list[dict] = []
-    for backend in ("snapvec", "faiss", "hnswlib"):
+    for backend in ("snapvec", "faiss", "hnswlib", "sqlite_vec"):
         print(f"running backend: {backend} (subprocess)...")
         all_rows.extend(run_backend_subprocess(backend))
 
@@ -325,6 +424,7 @@ def main_backend(backend: str, out_path: str) -> None:
         "snapvec": run_snapvec,
         "faiss": run_faiss,
         "hnswlib": run_hnswlib,
+        "sqlite_vec": run_sqlite_vec,
     }[backend]
     rows = runner()
     with open(out_path, "w") as f:
@@ -333,7 +433,10 @@ def main_backend(backend: str, out_path: str) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--backend", choices=("snapvec", "faiss", "hnswlib"))
+    parser.add_argument(
+        "--backend",
+        choices=("snapvec", "faiss", "hnswlib", "sqlite_vec"),
+    )
     parser.add_argument("--out")
     args = parser.parse_args()
     if args.backend is not None and args.out is not None:

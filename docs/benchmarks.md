@@ -18,9 +18,90 @@ BEIR FIQA, N = 57,638, dim = 384 (BGE-small), nlist = 512, M = 192, K = 256.
 
 5.8x speedup vs v0.6 at identical recall, past the PQ-only 0.929 ceiling.
 
-## snapvec vs sqlite-vec (measured)
+## Head-to-head: snapvec vs FAISS vs hnswlib vs sqlite-vec
 
-Same corpus, same hardware. `snapvec` at `nprobe=64` + rerank.
+Single unified table across every backend tested, at their standard
+operating points **and** at matched-budget points where we have a
+comparable PQ config.  Goal is to let the reader see the full Pareto
+shape rather than cherry-picked wins.
+
+**Config.** BEIR FIQA corpus (N = 57,638, dim = 384, BGE-small,
+unit-normalised).  200 queries sampled from FIQA's 648 test queries.
+Apple M4 Pro, 12 cores, 24 GB RAM, NumPy 2.4.3, Python 3.12.  Every
+backend pinned to a single thread for apples-to-apples per-query
+latency.  GC disabled inside the timing loop.  **Ground truth** is
+float32 brute-force top-10 dot product on the same unit-normalised
+corpus -- recall@10 is against exact NN.
+
+| Backend | recall@10 | p50 us | p99 us | disk MB | build s |
+|---------|----------:|-------:|-------:|--------:|--------:|
+| sqlite-vec (brute-force cosine, exact) | **1.000** | 13080 | 14916 | 91.1 | 0.6 |
+| hnswlib (M=32, ef_search=128) | 0.994 | 502 | 819 | 104.5 | 5 |
+| **snapvec IVFPQ + fp16 rerank (M=192)** | **0.945** | **355** | 424 | 56.9 | 115 |
+| FAISS IVFPQ (M=192) [matched-budget] | 0.906 | 475 | 623 | 12.7 | 17 |
+| **snapvec IVFPQ no rerank (M=192)** | 0.895 | **336** | 420 | 12.6 | 112 |
+| snapvec SnapIndex flat (bits=4, full-scan) | 0.854 | 4244 | 4745 | 15.4 | 1 |
+| FAISS IVFPQ (M=48) | 0.603 | 168 | 298 | 4.4 | 10 |
+| snapvec IVFPQ no rerank (M=48) [matched-budget] | 0.549 | 271 | 365 | 4.3 | 37 |
+
+Rows ordered by recall@10 descending.
+
+### Reading the table
+
+The Pareto frontier (no backend strictly dominated) is:
+
+1. **FAISS IVFPQ M=48** owns the aggressive-compression corner --
+   0.603 recall at 4.4 MB and 168 us.  snapvec at the same M budget
+   is slower AND has lower recall, so at that ultra-compressed point
+   FAISS wins outright.
+2. **snapvec IVFPQ M=192** matches FAISS M=192 on disk (12.6 vs
+   12.7 MB) and on recall (0.895 vs 0.906) while being **1.4x faster**
+   at p50 (336 vs 475 us).  This is the matched-budget headline.
+3. **snapvec IVFPQ + fp16 rerank** is the Pareto-dominant high-recall
+   point under 500 us: 0.945 recall at 355 us -- faster than FAISS
+   M=192 AND higher recall, at the cost of a 4.5x larger index file
+   (holds a float16 copy for the rerank pass).
+4. **hnswlib** reaches the highest non-exact recall (0.994) but pays
+   with disk (104 MB) and p99 latency (819 us).
+5. **sqlite-vec** is exact (recall 1.000) but its brute-force
+   cosine scan is 13 ms -- ~40x slower than any of the ANN backends
+   on this N.  It's the 'zero ANN tuning, accept the latency' baseline.
+
+### Positioning in plain language
+
+- If you need **one dependency, no training, acceptable latency on
+  small N**: `SnapIndex flat` or sqlite-vec.  snapvec is faster
+  (4.2 ms vs 13 ms) but gives up exactness (0.85 vs 1.00 recall).
+- If you have **space for PQ training and want aggressive disk
+  compression (~4 MB)**: FAISS IVFPQ M=48 is the winner at that
+  point on this hardware.
+- If you want **matched disk and the fastest ANN latency for
+  recall ~0.9**: snapvec IVFPQ M=192.
+- If you want **recall approaching 0.95 in sub-millisecond latency**:
+  snapvec IVFPQ + fp16 rerank (4.5x disk for ~5 pp recall lift).
+- If you want **the highest recall regardless of disk / tail
+  latency**: hnswlib.
+
+### Caveats
+
+- FAISS `fit` is ~7x faster than snapvec's `fit` at the same config
+  (16 s vs 112 s at M=192).  Build time is a real competitive gap.
+- FAISS IVFPQ at M=48 beats snapvec at M=48; snapvec's PQ training
+  isn't uniformly better at every compression point.  The advantage
+  shows up at mid-range (M=96-192).
+- These are serial per-query numbers.  hnswlib in particular gets a
+  large speedup from its default thread pool; the [threading curve]
+  section covers how snapvec scales batched search.
+
+Reproduce with `python experiments/bench_competitive.py` after
+caching both `experiments/.cache_fiqa_bge_small.npy` and
+`experiments/.cache_fiqa_queries_bge_small.npy`.
+
+## Historical: snapvec vs sqlite-vec across N
+
+The earlier (pre-competitive-table) snapvec-vs-sqlite-vec scale
+measurement, kept for the absolute scaling story snapvec unlocks.
+`snapvec` at `nprobe=64` + rerank.
 
 | N | sqlite-vec | snapvec | Speedup | Recall tradeoff |
 |---|------------|---------|---------|-----------------|
@@ -29,47 +110,6 @@ Same corpus, same hardware. `snapvec` at `nprobe=64` + rerank.
 | 100k | 23.8 ms | 1.04 ms | 23x | 0.994 |
 | 500k | ~110 ms | 0.9 ms | 125x | ~0.97 |
 | 1M | brute-force infeasible | 1.1 ms | -- | -- |
-
-Disk footprint is 2-8x smaller across the range.
-
-## snapvec vs FAISS vs hnswlib (measured)
-
-Head-to-head on BEIR FIQA (N = 57,638, dim = 384, BGE-small),
-Apple M4 Pro, single-thread per-query latency, p50 and p99 over 200
-queries, 10-NN vs brute-force float32 ground truth.
-
-| Backend | recall@10 | p50 us | p99 us | disk MB | build s |
-|---------|----------:|-------:|-------:|--------:|--------:|
-| `snapvec` IVFPQ + fp16 rerank (M=192) | **0.945** | **342** | 474 | 56.9 | 128 |
-| `snapvec` IVFPQ no rerank (M=192)     | 0.895 | 352 | 658 | 12.6 | 127 |
-| FAISS IVFPQ (M=192) [matched-budget]  | 0.906 | 476 | 551 | 12.7 | 17 |
-| FAISS IVFPQ (M=48)                    | 0.603 | 145 | 189 | 4.4 | 10 |
-| hnswlib (M=32, ef_search=128)         | **0.994** | 601 | 1033 | 104.5 | 8 |
-
-All backends pinned to a single thread for per-query latency parity
-(`faiss.omp_set_num_threads(1)`, `hnswlib.set_num_threads(1)`).
-
-Matched-budget line (same PQ M=192, same no-rerank config):
-
-- snapvec 0.895 recall @ 352 us
-- FAISS   0.906 recall @ 476 us (**1.35x slower**, essentially the same recall and disk)
-
-With `fp16 rerank`, snapvec lifts recall to 0.945 without extra
-latency (342 us p50) at the cost of 4.5x disk (fp16 cache stored next
-to the PQ codes).  hnswlib reaches higher recall (0.994) but at 2-3x
-latency and 2x disk vs snapvec+rerank.
-
-Where each wins:
-
-- **snapvec**: best single-thread latency at high recall; lowest disk
-  under matched PQ; zero runtime deps beyond NumPy.
-- **FAISS**: much faster `fit` (16 s vs 128 s for snapvec at M=192)
-  and the smallest footprint when PQ compression is pushed hard.
-- **hnswlib**: highest ceiling recall if disk and latency budget are
-  flexible; no training phase.
-
-Reproduce with `python experiments/bench_competitive.py` after
-caching the FIQA corpus + queries.
 
 ## Batched search threading curve
 
