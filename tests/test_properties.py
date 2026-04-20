@@ -160,6 +160,56 @@ def test_pq_fit_then_add_then_len(
     assert len(idx) == n
 
 
+@PROFILE
+@given(
+    dim_pair=st.sampled_from([(16, 4), (32, 8)]),
+    n=st.integers(min_value=20, max_value=80),
+    seed=st.integers(min_value=0, max_value=2**16),
+)
+def test_pq_save_load_preserves_search(
+    dim_pair: tuple[int, int],
+    n: int,
+    seed: int,
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """PQSnapIndex save/load preserves search output."""
+    dim, M = dim_pair
+    vecs = _corpus(n, dim, seed)
+    idx = PQSnapIndex(dim=dim, M=M, K=16, seed=0)
+    idx.fit(vecs)
+    idx.add_batch(list(range(n)), vecs)
+
+    path: Path = tmp_path_factory.mktemp("prop") / "idx.snpq"
+    idx.save(path)
+    loaded = PQSnapIndex.load(path)
+
+    before = idx.search(vecs[0], k=min(5, n))
+    after = loaded.search(vecs[0], k=min(5, n))
+    assert before == after
+
+
+@PROFILE
+@given(
+    dim_pair=st.sampled_from([(16, 4), (32, 8)]),
+    n=st.integers(min_value=20, max_value=80),
+    seed=st.integers(min_value=0, max_value=2**16),
+)
+def test_pq_delete_reduces_len(
+    dim_pair: tuple[int, int], n: int, seed: int
+) -> None:
+    """Deleting an existing id in PQSnapIndex reduces len by exactly 1."""
+    dim, M = dim_pair
+    vecs = _corpus(n, dim, seed)
+    idx = PQSnapIndex(dim=dim, M=M, K=16, seed=0)
+    idx.fit(vecs)
+    idx.add_batch(list(range(n)), vecs)
+
+    assert idx.delete(0) is True
+    assert len(idx) == n - 1
+    assert idx.delete(10**9) is False
+    assert len(idx) == n - 1
+
+
 # --------------------------------------------------------------------------- #
 # IVFPQSnapIndex invariants                                                    #
 # --------------------------------------------------------------------------- #
@@ -201,3 +251,27 @@ def test_ivfpq_unknown_filter_returns_empty(n: int, seed: int) -> None:
 
     hits = idx.search(vecs[0], k=5, filter_ids={"nope-nope-nope"})
     assert hits == []
+
+
+@PROFILE
+@given(
+    n=st.integers(min_value=100, max_value=200),
+    seed=st.integers(min_value=0, max_value=2**16),
+)
+def test_ivfpq_save_load_preserves_search(
+    n: int, seed: int, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """IVFPQSnapIndex save/load preserves search output."""
+    dim, M, K, nlist = 16, 4, 16, 8
+    vecs = _corpus(n, dim, seed)
+    idx = IVFPQSnapIndex(dim=dim, nlist=nlist, M=M, K=K, seed=0)
+    idx.fit(vecs)
+    idx.add_batch(list(range(n)), vecs)
+
+    path: Path = tmp_path_factory.mktemp("prop") / "idx.snpi"
+    idx.save(path)
+    loaded = IVFPQSnapIndex.load(path)
+
+    before = idx.search(vecs[0], k=5, nprobe=4)
+    after = loaded.search(vecs[0], k=5, nprobe=4)
+    assert before == after

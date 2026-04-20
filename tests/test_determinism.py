@@ -99,6 +99,7 @@ def test_ivfpqsnapindex_save_is_bitwise_deterministic(tmp_path: Path) -> None:
         (SnapIndex, ".snpv", {"bits": 4}),
         (PQSnapIndex, ".snpq", {"M": 8, "K": 16}),
         (ResidualSnapIndex, ".snpr", {"b1": 3, "b2": 3}),
+        (IVFPQSnapIndex, ".snpi", {"nlist": 8, "M": 8, "K": 16}),
     ],
 )
 def test_search_results_are_deterministic(
@@ -120,7 +121,6 @@ def test_search_results_are_deterministic(
     idx_a = build()
     idx_b = build()
 
-    # Use hasattr so we don't have to special-case rerank_M / nprobe here.
     query = vecs[7]
     hits_a = idx_a.search(query, k=5)
     hits_b = idx_b.search(query, k=5)

@@ -24,7 +24,8 @@ process.
 
 ## Recommended pattern
 
-If your application has multiple writers, wrap mutations in a lock:
+If your application overlaps readers and writers, every public call
+must acquire the same lock.  A simple wrapper:
 
 ```python
 import threading
@@ -43,11 +44,18 @@ class SafeIndex:
             return self._idx.delete(id_)
 
     def search(self, query, k=10, **kwargs):
-        return self._idx.search(query, k=k, **kwargs)  # no lock
+        with self._lock:
+            return self._idx.search(query, k=k, **kwargs)
 ```
 
-Readers do not need the lock: `search()` only touches immutable shared
-state (codes, centroids) and thread-local scratch.
+If you *never* mutate the index during reads (typical for a
+build-then-serve workflow: one `add_batch` at startup, many `search()`
+calls forever after), the reader lock can be skipped -- `search()`
+only touches immutable shared state (codes, centroids) and
+thread-local scratch.  If you need higher read concurrency *and*
+occasional writes, use a `threading.RLock` plus a read/write wrapper
+(for example, the `readerwriterlock` package) at the application
+layer.
 
 ## Cross-process access
 
