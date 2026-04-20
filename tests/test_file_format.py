@@ -273,3 +273,49 @@ def _build_ivfpq() -> IVFPQSnapIndex:
     idx.fit(corpus)
     idx.add_batch(list(range(200)), corpus)
     return idx
+
+
+# ──────────────────────────────────────────────────────────────────── #
+# Forward-compatibility: future-version files must raise with a        #
+# clear upgrade hint so the user knows what to do.                     #
+# ──────────────────────────────────────────────────────────────────── #
+
+
+def _patch_version(path: Path, new_version: int) -> None:
+    """Overwrite the 4-byte little-endian version field that lives
+    immediately after the 4-byte magic in every snapvec index file."""
+    import struct
+    import zlib
+
+    buf = bytearray(path.read_bytes())
+    buf[4:8] = new_version.to_bytes(4, "little")
+    # Re-compute the CRC32 trailer so we don't fail on corruption
+    # before the version check fires.  Use the module constants so
+    # this helper tracks the production trailer layout automatically.
+    magic_size = len(_TRAILER_MAGIC)
+    payload = bytes(buf[:-_TRAILER_SIZE])
+    crc = zlib.crc32(payload) & 0xFFFFFFFF
+    buf[-_TRAILER_SIZE : -(_TRAILER_SIZE - magic_size)] = _TRAILER_MAGIC
+    buf[-(_TRAILER_SIZE - magic_size) :] = struct.pack("<I", crc)
+    path.write_bytes(bytes(buf))
+
+
+@pytest.mark.parametrize("builder, suffix, loader", [
+    (_build_snap,     ".snpv", lambda p: SnapIndex.load(p)),
+    (_build_residual, ".snpr", lambda p: ResidualSnapIndex.load(p)),
+    (_build_pq,       ".snpq", lambda p: PQSnapIndex.load(p)),
+    (_build_ivfpq,    ".snpi", lambda p: IVFPQSnapIndex.load(p)),
+])
+def test_future_version_raises_with_upgrade_hint(
+    builder, suffix, loader, tmp_path: Path,
+) -> None:
+    """A file whose version byte is far in the future must raise with
+    a message that points the user at `pip install -U snapvec`.  The
+    exact error wording is free, but the 'upgrade' hint has to be
+    there so end users know what to do."""
+    idx = builder()
+    path = tmp_path / f"future{suffix}"
+    idx.save(path)
+    _patch_version(path, new_version=999)
+    with pytest.raises(ValueError, match="upgrade"):
+        loader(path)
