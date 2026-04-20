@@ -33,6 +33,14 @@ latency.  GC disabled inside the timing loop.  **Ground truth** is
 float32 brute-force top-10 dot product on the same unit-normalised
 corpus -- recall@10 is against exact NN.
 
+Every row below is approximate (recall < 1.0) **except sqlite-vec**,
+which is an exact brute-force scan.  snapvec has no exact mode --
+every `SnapIndex` / `PQSnapIndex` / `IVFPQSnapIndex` variant quantizes
+the vectors on ingest, so the lowest-tier `SnapIndex 4-bit` row is
+"full-scan + scalar quantization", **not** flat-exact in the FAISS
+`IndexFlat` sense.  For flat-exact behaviour with snapvec's storage
+story, use sqlite-vec or FAISS `IndexFlatIP`.
+
 | Backend | recall@10 | p50 us | p99 us | disk MB | build s |
 |---------|----------:|-------:|-------:|--------:|--------:|
 | sqlite-vec (brute-force cosine, exact) | **1.000** | 13080 | 14916 | 91.1 | 0.6 |
@@ -40,7 +48,7 @@ corpus -- recall@10 is against exact NN.
 | **snapvec IVFPQ + fp16 rerank (M=192)** | **0.945** | **355** | 424 | 56.9 | 115 |
 | FAISS IVFPQ (M=192) [matched-budget] | 0.906 | 475 | 623 | 12.7 | 17 |
 | **snapvec IVFPQ no rerank (M=192)** | 0.895 | **336** | 420 | 12.6 | 112 |
-| snapvec SnapIndex flat (bits=4, full-scan) | 0.854 | 4244 | 4745 | 15.4 | 1 |
+| snapvec SnapIndex 4-bit scalar (full-scan) | 0.854 | 4244 | 4745 | 15.4 | 1 |
 | FAISS IVFPQ (M=48) | 0.603 | 168 | 298 | 4.4 | 10 |
 | snapvec IVFPQ no rerank (M=48) [matched-budget] | 0.549 | 271 | 365 | 4.3 | 37 |
 
@@ -76,8 +84,10 @@ The Pareto frontier (no backend strictly dominated) is:
 ### Positioning in plain language
 
 - If you need **one dependency, no training, acceptable latency on
-  small N**: `SnapIndex flat` or sqlite-vec.  snapvec is faster
-  (4.2 ms vs 13 ms) but gives up exactness (0.85 vs 1.00 recall).
+  small N**: `SnapIndex` at 4-bit scalar or sqlite-vec.  snapvec is
+  faster (4.2 ms vs 13 ms) but gives up exactness (0.85 vs 1.00
+  recall) because it quantizes the vectors; sqlite-vec stays exact
+  and wins the recall@10 column.
 - If you have **space for PQ training and want aggressive disk
   compression (~4 MB)**: FAISS IVFPQ M=48 is the winner at that
   point on this hardware.

@@ -145,11 +145,11 @@ def run_snapvec() -> list[dict]:
     )
     disk_flat = disk_size(lambda p: flat.save(p))
     results.append(dict(
-        name="snapvec SnapIndex flat (bits=4, full-scan)",
+        name="snapvec SnapIndex 4-bit scalar (full-scan)",
         recall=recall_at_k(pred_flat, truth, K),
         p50_us=p50_flat, p99_us=p99_flat,
         disk_bytes=disk_flat, build_s=build_flat,
-        notes="no training, no IVF",
+        notes="Lloyd-Max scalar quantized, no IVF, no training",
         library_version=snapvec_version,
     ))
 
