@@ -6,6 +6,92 @@ the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.10.0] -- 2026-04-20
+
+Headline: **professionalisation release.**  No library behaviour
+changes; every PR landed between `v0.9.0` and this tag wires up the
+infrastructure, tests, documentation, and benchmarks that make snapvec
+ready for third-party adoption and publishable comparisons.
+
+### Added
+
+- **CI matrix** across Linux x86_64/aarch64, macOS-13 / macOS-14, and
+  Windows on CPython 3.10, 3.12, 3.13 (PR #43).  Pre-compiled wheels
+  via `cibuildwheel` + PyPI trusted publishing on `v*` tags.
+- **Documentation site** at <https://stffns.github.io/snapvec/> built
+  from MkDocs Material + `mkdocstrings`.  Eighteen pages: getting
+  started, one user-guide per index type, architecture, benchmarks,
+  concurrency contract, API reference, changelog (PR #49).
+- **Executable examples** in `examples/` (quickstart, PQ, IVF-PQ with
+  rerank, filter search, save/load, streaming ingest) exercised by
+  the CI matrix on every commit (PR #49).
+- **Community files**: `SECURITY.md`, `CODE_OF_CONDUCT.md`,
+  `CONTRIBUTING.md`, bug / feature / PR templates, dependabot, a
+  root `CLAUDE.md`, pre-commit config (PR #43).
+- **Test suite grew from 151 to 190+**:
+  - Hypothesis property-based tests (order-invariance, save/load
+    round-trip, delete reduces len, search respects k, filter
+    subset) across SnapIndex, PQSnapIndex, IVFPQSnapIndex (PR #50).
+  - Determinism tests: same seed + same inputs produces byte-identical
+    index files for all four classes (PR #50).
+  - Adversarial tests: empty index, n=1, k > n, zero-norm queries,
+    degenerate distributions, bit-extreme configurations (PR #50).
+  - Forward-compat tests: patch a known-good file's version byte and
+    assert the loader raises an upgrade hint (PR #52).
+  - Recall regression smoke test on a clustered synthetic corpus:
+    asserts IVFPQ + rerank stays >= 0.90 recall@10 on every CI run
+    (PR #52).
+- **`bench/threading`** curve on search_batch: p50 across num_threads
+  = 1, 2, 4, 8 and nprobe in (4..256).  Published in docs (PR #51).
+- **`bench/competitive`** head-to-head on BEIR FIQA: snapvec (three
+  bit-depths for flat + IVFPQ with and without rerank at M=48 and
+  M=192) vs FAISS IVFPQ (M=48 and M=192 matched-budget) vs hnswlib
+  vs sqlite-vec.  Unified Pareto table in docs (PR #53).
+- **MkDocs site now deploys automatically** to GitHub Pages on every
+  merge to `main` (PR #49).
+
+### Changed
+
+- **`SnapIndex.search(k)`** now raises `ValueError` for `k < 1`, matching
+  the validation that `PQSnapIndex`, `ResidualSnapIndex`, and
+  `IVFPQSnapIndex` already had (PR #50).  Caught by the new adversarial
+  suite; prior behaviour returned all results on `k=0` and `n-1`
+  results on `k=-1` via an accidental slicing interaction.
+- **Forward-compat errors** on `load()` now name the versions this
+  build supports and point at `pip install -U snapvec` (PR #52).  The
+  old `"unsupported version N"` is gone.
+- **README trimmed from 673 to 91 lines**; technical content moved to
+  the MkDocs site under structured navigation (PR #49).
+- **macOS arm64 build** uses `-mcpu=native` instead of `-march=native`
+  (which Xcode 15 clang rejects as `unknown target CPU 'apple-m1'`).
+  Fixed the CI build on GitHub's `macos-14` runners (PR #43).
+
+### Fixed
+
+- Ten ruff lint errors in snapvec/ and tests/ (unused locals and
+  ambiguous `l` loop variable) (PR #43).
+
+### Documentation
+
+- **Concurrency contract** (`docs/user-guide/concurrency.md`) makes
+  the single-writer / multi-reader guarantee explicit.  Calls out
+  that `freeze()` (or one warm-up search) is required before
+  fanning out to reader threads because `SnapIndex.search`
+  lazily materialises its fp16 centroid cache on the first query
+  (PR #50, PR #51).
+- **Benchmarks page** covers FIQA recall, sqlite-vec scale, the
+  threading curve, and the competitive comparison (PR #53).
+- **README badges**: PyPI version, Python versions, CI, Docs
+  deployment, license, monthly downloads (PR #43, PR #49).
+
+### Infrastructure
+
+- `hypothesis` pulled into `[dev]` optional deps (PR #50).
+- `mkdocs`, `mkdocs-material`, `mkdocstrings[python]` pulled into a
+  new `[docs]` optional extra (PR #49).
+- `faiss-cpu`, `hnswlib`, `sqlite-vec` used only by the competitive
+  bench; **not** added as snapvec runtime dependencies.
+
 ## [0.9.0] -- 2026-04-16
 
 Headline: **5.8x faster search via Cython compiled kernels,

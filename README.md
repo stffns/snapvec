@@ -74,6 +74,10 @@ quantization library, but the design constraints (NumPy-only base
 install, predictable latency, reproducible index files) come from
 vstash's local-first requirements.
 
+## Roadmap
+
+See [ROADMAP.md](ROADMAP.md) for planned work and explicit non-goals.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, the test matrix,
