@@ -57,6 +57,7 @@ from ._rotation import padded_dim, rht
 
 _MAGIC = b"SNPV"
 _VERSION = 3  # v3: tight 3-bit packing (0.375 bytes/coord); see File format notes
+_LEGACY_VERSIONS: tuple[int, ...] = (1, 2)
 _FLAG_PROD = 0x1
 _FLAG_NORMALIZED = 0x2
 
@@ -598,9 +599,10 @@ class SnapIndex(FreezableIndex):
                 use_prod = bool(flags & _FLAG_PROD)
                 normalized = bool(flags & _FLAG_NORMALIZED)
             else:
+                supported = sorted({_VERSION, *_LEGACY_VERSIONS})
                 raise ValueError(
                     f"unsupported .snpv version {version}; this build of "
-                    f"snapvec supports versions [1, 2, 3].  If {version} > "
+                    f"snapvec supports versions {supported}.  If {version} > "
                     f"{_VERSION} this file was written by a newer snapvec -- "
                     f"upgrade via `pip install -U snapvec`."
                 )

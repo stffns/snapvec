@@ -284,16 +284,19 @@ def _build_ivfpq() -> IVFPQSnapIndex:
 def _patch_version(path: Path, new_version: int) -> None:
     """Overwrite the 4-byte little-endian version field that lives
     immediately after the 4-byte magic in every snapvec index file."""
-    buf = bytearray(path.read_bytes())
-    buf[4:8] = new_version.to_bytes(4, "little")
-    # Re-compute CRC32 trailer so we don't fail on corruption before the
-    # version check fires.
     import struct
     import zlib
-    payload = bytes(buf[:-8])
+
+    buf = bytearray(path.read_bytes())
+    buf[4:8] = new_version.to_bytes(4, "little")
+    # Re-compute the CRC32 trailer so we don't fail on corruption
+    # before the version check fires.  Use the module constants so
+    # this helper tracks the production trailer layout automatically.
+    magic_size = len(_TRAILER_MAGIC)
+    payload = bytes(buf[:-_TRAILER_SIZE])
     crc = zlib.crc32(payload) & 0xFFFFFFFF
-    buf[-8:-4] = b"CRC2"
-    buf[-4:] = struct.pack("<I", crc)
+    buf[-_TRAILER_SIZE : -(_TRAILER_SIZE - magic_size)] = _TRAILER_MAGIC
+    buf[-(_TRAILER_SIZE - magic_size) :] = struct.pack("<I", crc)
     path.write_bytes(bytes(buf))
 
 
