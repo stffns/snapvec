@@ -41,6 +41,7 @@ Issues       = "https://github.com/stffns/snapvec/issues"
 dev = [
     "pytest",
     "pytest-cov",
+    "hypothesis>=6.100",
     "mypy>=1.8",
     "ruff",
     "Cython>=3.0",
