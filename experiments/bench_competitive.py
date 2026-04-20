@@ -131,27 +131,29 @@ def run_snapvec() -> list[dict]:
 
     # SnapIndex: training-free scalar quantization, full-scan.
     # Included as the "no fit, no IVF, zero deps" baseline -- the
-    # simplest snapvec mode, which competes with brute-force float32.
-    flat = SnapIndex(dim=dim, bits=4, normalized=True, seed=0)
-    t0 = perf_counter()
-    flat.add_batch(list(range(len(corpus))), corpus)
-    flat.freeze()  # pre-warm fp16 cache so single-query latency is hot
-    build_flat = perf_counter() - t0
-    pred_flat = np.array([
-        [i for i, _ in flat.search(q, k=K)] for q in queries
-    ])
-    p50_flat, p99_flat = time_per_query(
-        lambda q: flat.search(q, k=K), queries,
-    )
-    disk_flat = disk_size(lambda p: flat.save(p))
-    results.append(dict(
-        name="snapvec SnapIndex 4-bit scalar (full-scan)",
-        recall=recall_at_k(pred_flat, truth, K),
-        p50_us=p50_flat, p99_us=p99_flat,
-        disk_bytes=disk_flat, build_s=build_flat,
-        notes="Lloyd-Max scalar quantized, no IVF, no training",
-        library_version=snapvec_version,
-    ))
+    # simplest snapvec mode.  Also report 3-bit and 2-bit to show how
+    # the recall / bits curve lands on real embeddings.
+    for b in (4, 3, 2):
+        flat = SnapIndex(dim=dim, bits=b, normalized=True, seed=0)
+        t0 = perf_counter()
+        flat.add_batch(list(range(len(corpus))), corpus)
+        flat.freeze()  # pre-warm fp16 cache so single-query latency is hot
+        build_flat = perf_counter() - t0
+        pred_flat = np.array([
+            [i for i, _ in flat.search(q, k=K)] for q in queries
+        ])
+        p50_flat, p99_flat = time_per_query(
+            lambda q: flat.search(q, k=K), queries,
+        )
+        disk_flat = disk_size(lambda p: flat.save(p))
+        results.append(dict(
+            name=f"snapvec SnapIndex {b}-bit scalar (full-scan)",
+            recall=recall_at_k(pred_flat, truth, K),
+            p50_us=p50_flat, p99_us=p99_flat,
+            disk_bytes=disk_flat, build_s=build_flat,
+            notes="Lloyd-Max scalar, no IVF, no training",
+            library_version=snapvec_version,
+        ))
 
     # flagship: rerank on
     idx = IVFPQSnapIndex(

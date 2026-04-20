@@ -43,14 +43,16 @@ story, use sqlite-vec or FAISS `IndexFlatIP`.
 
 | Backend | recall@10 | p50 us | p99 us | disk MB | build s |
 |---------|----------:|-------:|-------:|--------:|--------:|
-| sqlite-vec (brute-force cosine, exact) | **1.000** | 13080 | 14916 | 91.1 | 0.6 |
-| hnswlib (M=32, ef_search=128) | 0.994 | 502 | 819 | 104.5 | 5 |
-| **snapvec IVFPQ + fp16 rerank (M=192)** | **0.945** | **355** | 424 | 56.9 | 115 |
-| FAISS IVFPQ (M=192) [matched-budget] | 0.906 | 475 | 623 | 12.7 | 17 |
-| **snapvec IVFPQ no rerank (M=192)** | 0.895 | **336** | 420 | 12.6 | 112 |
-| snapvec SnapIndex 4-bit scalar (full-scan) | 0.854 | 4244 | 4745 | 15.4 | 1 |
-| FAISS IVFPQ (M=48) | 0.603 | 168 | 298 | 4.4 | 10 |
-| snapvec IVFPQ no rerank (M=48) [matched-budget] | 0.549 | 271 | 365 | 4.3 | 37 |
+| sqlite-vec (brute-force cosine, exact) | **1.000** | 13757 | 17539 | 91.1 | 0.5 |
+| hnswlib (M=32, ef_search=128) | 0.994 | 507 | 823 | 104.5 | 43 |
+| **snapvec IVFPQ + fp16 rerank (M=192)** | **0.945** | **346** | 417 | 56.9 | 107 |
+| FAISS IVFPQ (M=192) [matched-budget] | 0.906 | 484 | 2116 | 12.7 | 17 |
+| **snapvec IVFPQ no rerank (M=192)** | 0.895 | **319** | 392 | 12.6 | 108 |
+| snapvec SnapIndex 4-bit scalar (full-scan) | 0.854 | 2727 | 4152 | 15.4 | 1.1 |
+| snapvec SnapIndex 3-bit scalar (full-scan) | 0.736 | 2717 | 2965 | 11.7 | 0.8 |
+| FAISS IVFPQ (M=48) | 0.603 | 143 | 194 | 4.4 | 10 |
+| snapvec SnapIndex 2-bit scalar (full-scan) | 0.618 | 2649 | 3127 | 8.0 | 0.7 |
+| snapvec IVFPQ no rerank (M=48) [matched-budget] | 0.549 | 269 | 342 | 4.3 | 33 |
 
 Rows ordered by recall@10 descending.
 
@@ -85,9 +87,11 @@ The Pareto frontier (no backend strictly dominated) is:
 
 - If you need **one dependency, no training, acceptable latency on
   small N**: `SnapIndex` at 4-bit scalar or sqlite-vec.  snapvec is
-  faster (4.2 ms vs 13 ms) but gives up exactness (0.85 vs 1.00
-  recall) because it quantizes the vectors; sqlite-vec stays exact
-  and wins the recall@10 column.
+  ~5x faster (2.7 ms vs 13.8 ms) but gives up exactness (0.85 vs
+  1.00 recall) because it quantizes the vectors.  `SnapIndex` p50
+  latency is essentially constant across bit depths (the fp16
+  centroid-expansion matmul dominates); the recall/disk tradeoff is
+  the only knob you turn.
 - If you have **space for PQ training and want aggressive disk
   compression (~4 MB)**: FAISS IVFPQ M=48 is the winner at that
   point on this hardware.
