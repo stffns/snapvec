@@ -32,6 +32,45 @@ Same corpus, same hardware. `snapvec` at `nprobe=64` + rerank.
 
 Disk footprint is 2-8x smaller across the range.
 
+## snapvec vs FAISS vs hnswlib (measured)
+
+Head-to-head on BEIR FIQA (N = 57,638, dim = 384, BGE-small),
+Apple M4 Pro, single-thread per-query latency, p50 and p99 over 200
+queries, 10-NN vs brute-force float32 ground truth.
+
+| Backend | recall@10 | p50 us | p99 us | disk MB | build s |
+|---------|----------:|-------:|-------:|--------:|--------:|
+| `snapvec` IVFPQ + fp16 rerank (M=192) | **0.945** | **342** | 474 | 56.9 | 128 |
+| `snapvec` IVFPQ no rerank (M=192)     | 0.895 | 352 | 658 | 12.6 | 127 |
+| FAISS IVFPQ (M=192) [matched-budget]  | 0.906 | 476 | 551 | 12.7 | 17 |
+| FAISS IVFPQ (M=48)                    | 0.603 | 145 | 189 | 4.4 | 10 |
+| hnswlib (M=32, ef_search=128)         | **0.994** | 601 | 1033 | 104.5 | 8 |
+
+All backends pinned to a single thread for per-query latency parity
+(`faiss.omp_set_num_threads(1)`, `hnswlib.set_num_threads(1)`).
+
+Matched-budget line (same PQ M=192, same no-rerank config):
+
+- snapvec 0.895 recall @ 352 us
+- FAISS   0.906 recall @ 476 us (**1.35x slower**, essentially the same recall and disk)
+
+With `fp16 rerank`, snapvec lifts recall to 0.945 without extra
+latency (342 us p50) at the cost of 4.5x disk (fp16 cache stored next
+to the PQ codes).  hnswlib reaches higher recall (0.994) but at 2-3x
+latency and 2x disk vs snapvec+rerank.
+
+Where each wins:
+
+- **snapvec**: best single-thread latency at high recall; lowest disk
+  under matched PQ; zero runtime deps beyond NumPy.
+- **FAISS**: much faster `fit` (16 s vs 128 s for snapvec at M=192)
+  and the smallest footprint when PQ compression is pushed hard.
+- **hnswlib**: highest ceiling recall if disk and latency budget are
+  flexible; no training phase.
+
+Reproduce with `python experiments/bench_competitive.py` after
+caching the FIQA corpus + queries.
+
 ## Batched search threading curve
 
 `IVFPQSnapIndex.search_batch` fans out per-query scoring across worker
