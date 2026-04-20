@@ -20,7 +20,7 @@ def main() -> None:
     corpus = rng.standard_normal((n_corpus, dim)).astype(np.float32)
     ids = [f"doc-{i:04d}" for i in range(n_corpus)]
 
-    idx = SnapIndex(dim=dim, bits=4, normalized=True, seed=0)
+    idx = SnapIndex(dim=dim, bits=4, seed=0)
     idx.add_batch(ids, corpus)
 
     query = rng.standard_normal(dim).astype(np.float32)

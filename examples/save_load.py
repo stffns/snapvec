@@ -22,7 +22,7 @@ def main() -> None:
 
     corpus = rng.standard_normal((n_corpus, dim)).astype(np.float32)
 
-    idx = SnapIndex(dim=dim, bits=4, normalized=True, seed=0)
+    idx = SnapIndex(dim=dim, bits=4, seed=0)
     idx.add_batch(list(range(n_corpus)), corpus)
 
     with tempfile.TemporaryDirectory() as tmp:

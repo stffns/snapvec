@@ -28,13 +28,13 @@ import numpy as np
 from snapvec import IVFPQSnapIndex
 
 corpus = np.random.randn(100_000, 384).astype(np.float32)
+query = np.random.randn(384).astype(np.float32)
 
 idx = IVFPQSnapIndex(
     dim=384,
     nlist=512,          # 4 * sqrt(N)
     M=16,
     K=256,
-    normalized=True,
     keep_full_precision=True,
     seed=0,
 )

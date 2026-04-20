@@ -20,7 +20,7 @@ def main() -> None:
     corpus = rng.standard_normal((n_corpus, dim)).astype(np.float32)
     queries = rng.standard_normal((n_queries, dim)).astype(np.float32)
 
-    idx = PQSnapIndex(dim=dim, M=16, K=256, normalized=True, seed=0)
+    idx = PQSnapIndex(dim=dim, M=16, K=256, seed=0)
     idx.fit(corpus[:1000])  # train codebooks on first half
     idx.add_batch(list(range(n_corpus)), corpus)
 

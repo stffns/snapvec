@@ -27,7 +27,6 @@ def main() -> None:
         nlist=64,
         M=16,
         K=256,
-        normalized=True,
         keep_full_precision=True,
         seed=0,
     )

@@ -41,7 +41,7 @@ from snapvec import SnapIndex
 rng = np.random.default_rng(0)
 corpus = rng.standard_normal((10_000, 384)).astype(np.float32)
 
-idx = SnapIndex(dim=384, bits=4, normalized=True, seed=0)
+idx = SnapIndex(dim=384, bits=4, seed=0)
 idx.add_batch(list(range(10_000)), corpus)
 
 query = rng.standard_normal(384).astype(np.float32)

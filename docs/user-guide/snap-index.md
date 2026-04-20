@@ -18,12 +18,20 @@ import numpy as np
 from snapvec import SnapIndex
 
 corpus = np.random.randn(10_000, 384).astype(np.float32)
-idx = SnapIndex(dim=384, bits=4, normalized=True, seed=0)
+idx = SnapIndex(dim=384, bits=4, seed=0)
 idx.add_batch(list(range(10_000)), corpus)
 
 query = np.random.randn(384).astype(np.float32)
 hits = idx.search(query, k=10)
 ```
+
+!!! tip "`normalized` is an optimization, not a default"
+    If your embeddings are already unit-length (for example, cosine-space
+    outputs from most modern sentence encoders), pass `normalized=True`
+    to skip the internal L2 normalization step.  With raw vectors (like
+    the example above), leave it at the default `False`.  Passing
+    `normalized=True` on non-unit inputs silently skips normalization
+    and scores will not match cosine similarity.
 
 ## Bits guidance
 

@@ -28,7 +28,7 @@ pip install snapvec
 import numpy as np
 from snapvec import SnapIndex
 
-idx = SnapIndex(dim=384, bits=4, normalized=True)
+idx = SnapIndex(dim=384, bits=4)
 idx.add_batch(list(range(10_000)), np.random.randn(10_000, 384).astype(np.float32))
 
 results = idx.search(np.random.randn(384).astype(np.float32), k=10)

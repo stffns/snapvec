@@ -17,7 +17,7 @@ def main() -> None:
     rng = np.random.default_rng(0)
     dim, batch_size, n_batches = 64, 100, 10
 
-    idx = SnapIndex(dim=dim, bits=4, normalized=True, seed=0)
+    idx = SnapIndex(dim=dim, bits=4, seed=0)
 
     for batch in range(n_batches):
         vecs = rng.standard_normal((batch_size, dim)).astype(np.float32)

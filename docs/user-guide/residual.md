@@ -20,8 +20,9 @@ import numpy as np
 from snapvec import ResidualSnapIndex
 
 corpus = np.random.randn(10_000, 384).astype(np.float32)
+query = np.random.randn(384).astype(np.float32)
 
-idx = ResidualSnapIndex(dim=384, b1=3, b2=3, normalized=True, seed=0)
+idx = ResidualSnapIndex(dim=384, b1=3, b2=3, seed=0)
 idx.add_batch(list(range(10_000)), corpus)
 
 hits = idx.search(query, k=10, rerank_M=100)

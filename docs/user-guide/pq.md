@@ -19,8 +19,9 @@ import numpy as np
 from snapvec import PQSnapIndex
 
 corpus = np.random.randn(50_000, 384).astype(np.float32)
+query = np.random.randn(384).astype(np.float32)
 
-idx = PQSnapIndex(dim=384, M=16, K=256, normalized=True, seed=0)
+idx = PQSnapIndex(dim=384, M=16, K=256, seed=0)
 idx.fit(corpus[:10_000])         # train codebooks on a sample
 idx.add_batch(list(range(50_000)), corpus)
 

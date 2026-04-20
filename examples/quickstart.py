@@ -1,7 +1,7 @@
 """Minimal SnapIndex example.
 
 Build a 4-bit scalar-quantized index over 1,000 random vectors and
-recover the exact top-1 for a handful of queries without any training.
+measure top-1 recall for a handful of queries without any training.
 
 Run with: python examples/quickstart.py
 """
@@ -19,7 +19,7 @@ def main() -> None:
     corpus = rng.standard_normal((n_corpus, dim)).astype(np.float32)
     queries = rng.standard_normal((n_queries, dim)).astype(np.float32)
 
-    idx = SnapIndex(dim=dim, bits=4, normalized=True, seed=0)
+    idx = SnapIndex(dim=dim, bits=4, seed=0)
     idx.add_batch(list(range(n_corpus)), corpus)
 
     print(f"SnapIndex: n={len(idx)}, dim={dim}, bits=4")

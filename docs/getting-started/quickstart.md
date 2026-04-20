@@ -15,12 +15,15 @@ from snapvec import SnapIndex
 rng = np.random.default_rng(0)
 corpus = rng.standard_normal((10_000, 384)).astype(np.float32)
 
-idx = SnapIndex(dim=384, bits=4, normalized=True, seed=0)
+idx = SnapIndex(dim=384, bits=4, seed=0)
 idx.add_batch(list(range(10_000)), corpus)
 ```
 
-`ids` can be any hashable (int, str, UUID); they are round-tripped through
-save/load.
+`ids` can be any hashable. They are serialized as strings by `save()`,
+so only numeric-looking values (`int`, `float`) round-trip to their
+original type; other values (UUIDs, tuples, arbitrary objects) come
+back as their `str()` form. See [Save and load](../user-guide/save-load.md)
+for the exact behavior.
 
 ## 2. Query
 
