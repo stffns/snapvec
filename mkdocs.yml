@@ -80,6 +80,7 @@ nav:
       - ResidualSnapIndex: user-guide/residual.md
       - Save and load: user-guide/save-load.md
       - Filtered search: user-guide/filter-search.md
+      - Concurrency: user-guide/concurrency.md
   - Architecture: architecture.md
   - Benchmarks: benchmarks.md
   - API reference:
