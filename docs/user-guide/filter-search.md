@@ -1,7 +1,9 @@
 # Filtered search
 
-Every index accepts `filter_ids=<set>` to restrict results to a subset
-of ids.
+`SnapIndex` and `IVFPQSnapIndex` accept `filter_ids=<set>` to restrict
+results to a subset of ids.  `PQSnapIndex` and `ResidualSnapIndex` do
+not yet support this argument; filter the returned list in Python if
+you need it.
 
 ```python
 filter_set = {f"doc-{i:04d}" for i in range(100)}
@@ -10,9 +12,10 @@ hits = idx.search(query, k=5, filter_ids=filter_set)
 
 ## Performance
 
-- **SnapIndex / PQSnapIndex / ResidualSnapIndex**: the filter is applied
-  after scoring, so it does not save scoring work. Useful when the
-  filter set is small relative to corpus.
+- **SnapIndex**: the filter is resolved to a sorted row-index slice
+  **before** the inner-product matmul, so a sparse filter actively
+  reduces scoring work (cost ~ `O(|filter_ids| * dim)` instead of
+  `O(N * dim)`).
 - **IVFPQSnapIndex** (cluster-aware): probe ranking is restricted to
   clusters that contain at least one filter row, so sparse filters skip
   clusters entirely. Rerank candidates are also drawn from the filtered

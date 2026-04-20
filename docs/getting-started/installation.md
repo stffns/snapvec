@@ -29,9 +29,11 @@ still works but the parallel search paths do not.
 
 ## Input dtype
 
-`snapvec` expects `np.float32` inputs everywhere. Passing `np.float64`
-(the NumPy default for `np.array([...])`) is an error because silently
-downcasting would be a surprise on the hot path.
+`snapvec` expects `np.float32` inputs everywhere. Internally, `add_batch`
+and `search` pass your arrays through `np.asarray(..., dtype=np.float32)`,
+so a `float64` input will be cast silently.  That cast allocates a full
+copy of the batch on every call, which is easy to miss in a hot path.
+Prefer `float32` at the source.
 
 ```python
 # Models that return float32 directly (most modern embeddings)

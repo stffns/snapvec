@@ -31,9 +31,16 @@ The canonical extensions are a convention for your tooling.
 
 ## IDs
 
-`ids` can be any hashable Python value. They are serialized as strings
-in the file and round-tripped through `load`. If you pass integers,
-they come back as integers; strings come back as strings.
+`ids` can be any hashable Python value.  They are serialized as strings
+in the file; on `load()`, `snapvec` tries to decode each string as
+`int`, then `float`, and falls back to the raw string.  That means:
+
+- `42` -> `42` (int round-trip).
+- `3.14` -> `3.14` (float round-trip).
+- `"abc"` -> `"abc"` (string round-trip).
+- `"123"` -> `123` (the string form of a number is loaded back as `int`,
+  not `str`).  If you need to preserve a numeric-looking string verbatim,
+  prefix it (for example, `"id-123"`) before ingesting.
 
 See [`examples/save_load.py`](https://github.com/stffns/snapvec/blob/main/examples/save_load.py)
 for a runnable example.

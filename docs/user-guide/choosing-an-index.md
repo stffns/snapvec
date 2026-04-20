@@ -9,14 +9,14 @@
 
 ## Sizing rules of thumb
 
-| Parameter | Default | Guidance |
-|-----------|---------|----------|
-| `bits` (SnapIndex) | 4 | 4 for ~95% recall at 6x compression. 3 for a sweet spot around 7.8x. 2 only for huge corpora where scale beats precision. |
-| `M` (PQ) | `dim // 4` | Higher M = higher recall, more disk. `M=16` is a common starting point for `dim=384` (BGE-small). |
-| `K` (PQ) | 256 | Fixed at 256 (one byte per sub-index). |
-| `nlist` (IVF) | `4 * sqrt(N)` | E.g. N=57k -> nlist=512, N=1M -> nlist=4096. |
-| `nprobe` (IVF) | `nlist // 16` | Trades recall for latency; tune per query. |
-| `rerank_candidates` (IVF) | `None` | Start at 100. Raises recall toward float32 ceiling. |
+| Parameter | Required? | Guidance |
+|-----------|-----------|----------|
+| `bits` (SnapIndex) | no, defaults to 4 | 4 for ~95% recall at 6x compression. 3 for a sweet spot around 7.8x. 2 only for huge corpora where scale beats precision. |
+| `M` (PQ) | **yes** | Higher M = higher recall, more disk. Starting point `dim // 4` (e.g. `M=96` for `dim=384`); many users ship with `M=16-32` for aggressive compression. |
+| `K` (PQ) | no, defaults to 256 | Leave at 256 (one byte per sub-index). |
+| `nlist` (IVF) | **yes** | Target `4 * sqrt(N)`. E.g. N=57k -> nlist=512, N=1M -> nlist=4096. |
+| `nprobe` (IVF) | no, defaults to `nlist // 16` | Trades recall for latency; tune per query. |
+| `rerank_candidates` (IVF) | no, defaults to `None` | Pass `100` to rerank the PQ candidates with the stored fp16 vectors. Raises recall toward the float32 ceiling. Requires `keep_full_precision=True` at construction. |
 
 ## Bits vs recall (SnapIndex)
 
