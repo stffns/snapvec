@@ -30,7 +30,6 @@ def test_basic_build_search() -> None:
 
 
 def test_rerank_matches_full() -> None:
-    rng = np.random.default_rng(2)
     corpus = _unit_gaussian(800, 128, seed=2)
     queries = _unit_gaussian(20, 128, seed=3)
     idx = ResidualSnapIndex(dim=128, b1=3, b2=3, seed=0, normalized=True)

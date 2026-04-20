@@ -157,15 +157,15 @@ def test_search_batch_filter_matches_loop_of_search() -> None:
     ]
 
     assert len(batch_hits) == len(loop_hits)
-    for b, l in zip(batch_hits, loop_hits):
+    for b, loop in zip(batch_hits, loop_hits):
         # Same id count, every hit in filter, and the returned score
         # for the *worst* hit in each list is within fp tolerance of
-        # the other's worst — proves both paths converge at the same
+        # the other's worst -- proves both paths converge at the same
         # top-k boundary even if tied candidates reorder inside it.
-        assert len(b) == len(l)
+        assert len(b) == len(loop)
         assert all(h[0] in filter_ids for h in b)
-        assert all(h[0] in filter_ids for h in l)
-        assert abs(b[-1][1] - l[-1][1]) < 1e-4
+        assert all(h[0] in filter_ids for h in loop)
+        assert abs(b[-1][1] - loop[-1][1]) < 1e-4
 
 
 def test_search_batch_filter_all_unknown_returns_empties() -> None:
