@@ -411,7 +411,12 @@ class PQSnapIndex(FreezableIndex):
                 "<IIIIIIIII", f.read(36)
             )
             if version != _VERSION:
-                raise ValueError(f"unsupported .snpq version {version}")
+                raise ValueError(
+                    f"unsupported .snpq version {version}; this build of "
+                    f"snapvec writes and reads version {_VERSION}.  If "
+                    f"{version} > {_VERSION} this file was written by a "
+                    f"newer snapvec -- upgrade via `pip install -U snapvec`."
+                )
             normalized = bool(flags & _FLAG_NORMALIZED)
             use_rht = bool(flags & _FLAG_USE_RHT)
             idx = cls(

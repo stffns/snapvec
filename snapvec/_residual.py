@@ -323,7 +323,12 @@ class ResidualSnapIndex(FreezableIndex):
                 "<IIIIIIII", f.read(32)
             )
             if version != _VERSION:
-                raise ValueError(f"unsupported .snpr version {version}")
+                raise ValueError(
+                    f"unsupported .snpr version {version}; this build of "
+                    f"snapvec writes and reads version {_VERSION}.  If "
+                    f"{version} > {_VERSION} this file was written by a "
+                    f"newer snapvec -- upgrade via `pip install -U snapvec`."
+                )
             normalized = bool(flags & 1)
             idx = cls(dim=dim, b1=b1, b2=b2, seed=seed, normalized=normalized)
             if pdim != idx._pdim:

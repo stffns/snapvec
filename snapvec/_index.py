@@ -598,7 +598,12 @@ class SnapIndex(FreezableIndex):
                 use_prod = bool(flags & _FLAG_PROD)
                 normalized = bool(flags & _FLAG_NORMALIZED)
             else:
-                raise ValueError(f"Unsupported file version: {version}")
+                raise ValueError(
+                    f"unsupported .snpv version {version}; this build of "
+                    f"snapvec supports versions [1, 2, 3].  If {version} > "
+                    f"{_VERSION} this file was written by a newer snapvec -- "
+                    f"upgrade via `pip install -U snapvec`."
+                )
 
             idx = cls(dim=dim, bits=bits, seed=seed, use_prod=use_prod,
                       normalized=normalized)

@@ -1025,7 +1025,13 @@ class IVFPQSnapIndex(FreezableIndex):
                 "<IIIIIIIIII", f.read(40)
             )
             if version != _VERSION and version not in _LEGACY_VERSIONS:
-                raise ValueError(f"unsupported .snpi version {version}")
+                supported = sorted({_VERSION, *_LEGACY_VERSIONS})
+                raise ValueError(
+                    f"unsupported .snpi version {version}; this build of "
+                    f"snapvec supports versions {supported}.  If {version} > "
+                    f"{_VERSION} this file was written by a newer snapvec -- "
+                    f"upgrade via `pip install -U snapvec`."
+                )
             normalized = bool(flags & _FLAG_NORMALIZED)
             use_rht = bool(flags & _FLAG_USE_RHT)
             keep_full_precision = bool(flags & _FLAG_KEEP_FULL_PRECISION)
