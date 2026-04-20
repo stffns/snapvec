@@ -217,9 +217,15 @@ class IVFPQSnapIndex(FreezableIndex):
             norms = np.empty(0, dtype=np.float32)
         else:
             raw = np.linalg.norm(arr, axis=1)
-            safe = np.where(raw > 1e-10, raw, 1.0).astype(np.float32)
-            units = (arr / safe[:, None]).astype(np.float32)
-            norms = np.where(raw > 1e-10, raw, 0.0).astype(np.float32)
+            safe = cast(
+                "NDArray[np.float32]",
+                np.where(raw > 1e-10, raw, np.float32(1.0)),
+            )
+            units = cast("NDArray[np.float32]", arr / safe[:, None])
+            norms = cast(
+                "NDArray[np.float32]",
+                np.where(raw > 1e-10, raw, np.float32(0.0)),
+            )
         if self.use_rht:
             padded = np.zeros((len(arr), self._pdim), dtype=np.float32)
             padded[:, : self.dim] = units
@@ -240,7 +246,7 @@ class IVFPQSnapIndex(FreezableIndex):
         padded[: self.dim] = q_unit
         rot = rht(padded[None, :], self.seed)[0]
         rot /= np.linalg.norm(rot) + 1e-12
-        return cast("NDArray[np.float32]", rot.astype(np.float32))
+        return cast("NDArray[np.float32]", rot)
 
     def _require_fitted(self) -> None:
         if not self._fitted:

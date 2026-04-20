@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import struct
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -148,8 +148,11 @@ class ResidualSnapIndex(FreezableIndex):
             batch_norms = None  # not stored in normalized mode
         else:
             raw_norms = np.linalg.norm(arr, axis=1)
-            safe = np.where(raw_norms > 1e-10, raw_norms, 1.0).astype(np.float32)
-            units = (arr / safe[:, None]).astype(np.float32)
+            safe = cast(
+                "NDArray[np.float32]",
+                np.where(raw_norms > 1e-10, raw_norms, np.float32(1.0)),
+            )
+            units = cast("NDArray[np.float32]", arr / safe[:, None])
             batch_norms = np.where(raw_norms > 1e-10, raw_norms, 0.0).astype(np.float32)
 
         pdim = self._pdim
