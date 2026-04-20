@@ -36,11 +36,12 @@ pytest --cov=snapvec --cov-report=term-missing
 
 ```bash
 ruff check snapvec/ tests/
-ruff format snapvec/ tests/
 mypy --strict snapvec/
 ```
 
-`pre-commit` runs ruff on every commit.
+`ruff format` is intentionally not used: it rewrites the hand-aligned
+codebook constants in `snapvec/_codebooks.py` into a less readable layout.
+`pre-commit` runs `ruff check` on every commit.
 
 ## Benchmarks
 

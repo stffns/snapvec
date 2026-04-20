@@ -6,7 +6,11 @@
 - Keep subject under 72 chars. Present-tense imperative.
 
 ## Code style
-- Pure ASCII only in source and docs. No em dashes, no smart quotes, no ellipsis character. Use `-`, `--`, `"`, `'`, `...`.
+- Prefer ASCII in new or edited text (source, docstrings, docs, commits).
+  No em dashes, no smart quotes, no ellipsis character. Use `-`, `--`,
+  `"`, `'`, `...`.  Existing math notation in docstrings (`sqrt`, arrows,
+  inner-product brackets) may remain unless you are already rewriting
+  that block.
 - English everywhere in code, docstrings, commits, and README.
 
 ## Project layout

@@ -13,7 +13,7 @@
 ## Checklist
 
 - [ ] Tests added or updated
-- [ ] `ruff check` and `ruff format` pass
+- [ ] `ruff check` passes
 - [ ] `pytest -q` passes locally
 - [ ] CHANGELOG updated under `[Unreleased]`
 - [ ] On-disk format version bumped if the format changed

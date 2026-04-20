@@ -608,12 +608,12 @@ def test_load_validates_offsets(tmp_path: Path) -> None:
     path = tmp_path / "x.snpi"
     idx.save(path)
 
-    # Corrupt: scramble offsets to be non-monotone (swap first two).
-    # Offsets are stored right after coarse + codebooks.  Easier to
-    # mutate via a fresh reload, edit, re-save.
+    # Corrupt: break the offsets[0] == 0 invariant so the loader rejects
+    # the file.  Easier to reload, mutate in memory, and re-save than to
+    # patch raw bytes at the right offset inside the binary format.
     reloaded = IVFPQSnapIndex.load(path)
     reloaded._offsets = reloaded._offsets.copy()
-    reloaded._offsets[0] = 99  # break the offsets[0]==0 invariant
+    reloaded._offsets[0] = 99
     reloaded.save(path)
     with pytest.raises(ValueError, match="offsets"):
         IVFPQSnapIndex.load(path)
