@@ -6,6 +6,27 @@ the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.10.1] -- 2026-04-20
+
+Release-infrastructure patch on top of v0.10.0.  No library changes.
+
+### Fixed
+
+- **cibuildwheel macOS arm64 target**: `MACOSX_DEPLOYMENT_TARGET=13.0`
+  was set uniformly for every macOS wheel, but the Homebrew libomp
+  installed on GitHub's `macos-14` runner is linked against macOS 14
+  system libraries.  `delocate-wheel` rejected the bundle with
+  "Library dependencies do not satisfy target MacOS version 13.0".
+  Pin the target per matrix row: `macos-13` builds (x86_64) stay at
+  `13.0`, `macos-14` builds (arm64) now target `14.0`.  User-visible
+  consequence: snapvec arm64 wheels require macOS 14+ (Sonoma); x86_64
+  wheels still work on macOS 13+.
+- **cibuildwheel test env missing hypothesis** (from v0.10.0 release
+  attempt, previously fixed in PR #57 but worth recording in the
+  release notes): the cibuildwheel test phase runs the full test
+  suite against the built wheel and needs every test-time import.
+  `CIBW_TEST_REQUIRES: "pytest hypothesis>=6.100"`.
+
 ## [0.10.0] -- 2026-04-20
 
 Headline: **professionalisation release.**  The only library change

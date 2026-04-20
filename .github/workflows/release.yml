@@ -33,7 +33,14 @@ jobs:
           CIBW_SKIP: "*-musllinux_* pp*"
           CIBW_ARCHS: ${{ matrix.cibw_archs }}
           CIBW_BEFORE_ALL_MACOS: "brew install libomp"
-          CIBW_ENVIRONMENT_MACOS: "MACOSX_DEPLOYMENT_TARGET=13.0"
+          # x86_64 wheels built on macos-13 can target 13.0.  arm64
+          # wheels built on macos-14 must target 14.0 because Homebrew
+          # libomp on macos-14 is linked against macOS 14 system
+          # libraries -- delocate-wheel rejects the bundle with
+          # 'Library dependencies do not satisfy target MacOS version 13.0'
+          # when we try to target 13.
+          CIBW_ENVIRONMENT_MACOS: >-
+            MACOSX_DEPLOYMENT_TARGET=${{ matrix.os == 'macos-13' && '13.0' || '14.0' }}
           CIBW_TEST_REQUIRES: "pytest hypothesis>=6.100"
           CIBW_TEST_COMMAND: "pytest {project}/tests -q"
 
