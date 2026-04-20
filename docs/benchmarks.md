@@ -32,6 +32,42 @@ Same corpus, same hardware. `snapvec` at `nprobe=64` + rerank.
 
 Disk footprint is 2-8x smaller across the range.
 
+## Batched search threading curve
+
+`IVFPQSnapIndex.search_batch` fans out per-query scoring across worker
+threads.  Threading is a throughput knob, not a per-call latency knob:
+the single `search()` API is serial on purpose (it competes with
+NumPy's internal BLAS pool; see the docstring).
+
+Same FIQA corpus as above (N = 57,638, dim = 384), batch_size = 128,
+measured on an Apple M4 Pro (12 cores), NumPy 2.4.3, Python 3.12.
+
+| `nprobe` | t=1 ms/q | t=2 ms/q | t=4 ms/q | t=8 ms/q | best speedup |
+|---------:|---------:|---------:|---------:|---------:|:------------:|
+| 4   | 0.09 | 0.06 | **0.05** | 0.06 | 1.69x |
+| 8   | 0.15 | 0.09 | **0.07** | 0.09 | 2.31x |
+| 16  | 0.29 | 0.16 | **0.10** | 0.13 | 2.92x |
+| 32  | 0.50 | 0.28 | **0.16** | 0.20 | 3.06x |
+| 64  | 0.95 | 0.51 | **0.29** | 0.33 | 3.31x |
+| 128 | 1.84 | 0.98 | **0.54** | 0.57 | 3.43x |
+| 256 | 3.70 | 1.91 | **1.01** | 1.09 | 3.67x |
+
+Observations:
+
+- **`num_threads=4` is the sweet spot** on this machine across every
+  nprobe.  At `num_threads=8` the curve regresses; the executor
+  over-subscribes the efficiency cores and starts fighting BLAS.
+- **Scaling improves with `nprobe`** because per-query work grows:
+  at `nprobe=4`, threading overhead caps speedup at 1.7x; at
+  `nprobe=256` it reaches 3.7x.
+- **Sub-millisecond at 4 threads** for `nprobe <= 64`, which spans
+  the 0.85 to 0.977 recall range from the headline table above.
+  That is 3,400 - 20,000 queries per second per process.
+
+Reproduce with `python experiments/bench_ivf_pq_threading.py` after
+caching both the FIQA corpus (`experiments/.cache_fiqa_bge_small.npy`)
+and the FIQA queries (`experiments/.cache_fiqa_queries_bge_small.npy`).
+
 ## Compression ratios
 
 For BGE-small (dim=384, float32 baseline = 1536 B/vec):
@@ -50,8 +86,9 @@ For BGE-small (dim=384, float32 baseline = 1536 B/vec):
 
 ```bash
 pip install -e ".[dev]"
-python experiments/bench_v090_fiqa.py       # FIQA recall / latency
-python experiments/bench_sqlite_vec_baseline.py   # sqlite-vec comparison
+python experiments/bench_v090_fiqa.py               # FIQA recall / latency
+python experiments/bench_ivf_pq_threading.py        # search_batch threading curve
+python experiments/bench_sqlite_vec_baseline.py     # sqlite-vec comparison
 ```
 
 The `experiments/` folder is WIP; expect rough edges. A first-class
