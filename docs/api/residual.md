@@ -1,0 +1,3 @@
+# ResidualSnapIndex
+
+::: snapvec.ResidualSnapIndex

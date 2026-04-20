@@ -14,9 +14,12 @@ dist/
 .pytest_cache/
 .ruff_cache/
 
-# experiment caches and harness state — large binary, not source of truth
+# experiment caches and harness state -- large binary, not source of truth
 experiments/.cache_*.npy
 .claude/scheduled_tasks.lock
 *.so
 snapvec/_fast.c
 build/
+
+# mkdocs build output
+site/

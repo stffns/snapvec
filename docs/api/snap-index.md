@@ -1,0 +1,3 @@
+# SnapIndex
+
+::: snapvec.SnapIndex
