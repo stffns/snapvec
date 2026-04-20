@@ -32,14 +32,32 @@ def _openmp_flags():
         return (["-fopenmp"], ["-fopenmp"])
 
 
+def _arch_flags():
+    """Host-optimized CPU target flags per platform.
+
+    GCC/clang on x86 accept ``-march=native``.  On ARM (Apple Silicon,
+    Graviton), clang expects ``-mcpu=native`` instead; passing
+    ``-march=native`` triggers ``unknown target CPU 'apple-m1'`` on the
+    Xcode-bundled clang that GitHub macos-14 runners ship.  MSVC doesn't
+    have an equivalent knob.
+    """
+    if sys.platform == "win32":
+        return []
+    machine = platform.machine().lower()
+    if machine in ("arm64", "aarch64"):
+        return ["-mcpu=native"]
+    return ["-march=native"]
+
+
 compile_flags, link_flags = _openmp_flags()
+arch_flags = _arch_flags()
 
 extensions = [
     Extension(
         "snapvec._fast",
         sources=["snapvec/_fast.pyx"],
         include_dirs=[np.get_include()],
-        extra_compile_args=["-O3", "-march=native"] + compile_flags,
+        extra_compile_args=["-O3"] + arch_flags + compile_flags,
         extra_link_args=link_flags,
     ),
 ]
