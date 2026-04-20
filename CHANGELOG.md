@@ -8,10 +8,11 @@ the project uses [Semantic Versioning](https://semver.org/).
 
 ## [0.10.0] -- 2026-04-20
 
-Headline: **professionalisation release.**  No library behaviour
-changes; every PR landed between `v0.9.0` and this tag wires up the
-infrastructure, tests, documentation, and benchmarks that make snapvec
-ready for third-party adoption and publishable comparisons.
+Headline: **professionalisation release.**  The only library change
+is a narrow fix in `SnapIndex.search` (reject `k < 1` with a clear
+error, matching the other three index types); everything else wires
+up the infrastructure, tests, documentation, and benchmarks that make
+snapvec ready for third-party adoption and publishable comparisons.
 
 ### Added
 
