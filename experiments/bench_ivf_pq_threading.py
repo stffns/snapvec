@@ -51,7 +51,8 @@ def time_batch(
     batch_size: int = BATCH_SIZE,
 ) -> tuple[float, float]:
     """Return (ms_per_query, total_elapsed_s) averaged over all batches."""
-    # Warm-up: first batch hits caches and spawns the executor.
+    # Warm-up: first batch warms LUT + gather caches.  The thread-pool
+    # executor itself is only created when num_threads > 1.
     _ = idx.search_batch(
         queries[:batch_size], k=KK, nprobe=nprobe, num_threads=num_threads,
     )
@@ -94,7 +95,8 @@ def main() -> None:
         row = []
         for t in THREAD_COUNTS:
             # The executor is lazily created and locked to the first
-            # num_threads value.  Close and rebuild between t settings.
+            # num_threads value.  Call close() between t settings to
+            # release the executor so it can be recreated for the next t.
             idx.close()
             ms, _ = time_batch(idx, queries, nprobe, t)
             row.append(ms)

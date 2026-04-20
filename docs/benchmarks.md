@@ -65,7 +65,8 @@ Observations:
   That is 3,400 - 20,000 queries per second per process.
 
 Reproduce with `python experiments/bench_ivf_pq_threading.py` after
-caching the FIQA corpus.
+caching both the FIQA corpus (`experiments/.cache_fiqa_bge_small.npy`)
+and the FIQA queries (`experiments/.cache_fiqa_queries_bge_small.npy`).
 
 ## Compression ratios
 
