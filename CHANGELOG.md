@@ -16,9 +16,11 @@ snapvec ready for third-party adoption and publishable comparisons.
 
 ### Added
 
-- **CI matrix** across Linux x86_64/aarch64, macOS-13 / macOS-14, and
-  Windows on CPython 3.10, 3.12, 3.13 (PR #43).  Pre-compiled wheels
-  via `cibuildwheel` + PyPI trusted publishing on `v*` tags.
+- **CI test matrix** on Linux, macOS-14, and Windows across CPython
+  3.10, 3.12, 3.13 (PR #43).  **Pre-compiled wheels** produced by
+  `cibuildwheel` cover Linux x86_64/aarch64, macOS-13 x86_64,
+  macOS-14 arm64, and Windows AMD64 across CPython 3.10, 3.11, 3.12,
+  3.13, published to PyPI on `v*` tags via trusted publishing.
 - **Documentation site** at <https://stffns.github.io/snapvec/> built
   from MkDocs Material + `mkdocstrings`.  Eighteen pages: getting
   started, one user-guide per index type, architecture, benchmarks,
