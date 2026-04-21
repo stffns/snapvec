@@ -6,8 +6,8 @@ authors:
     given-names: "Jayson"
     email: "stffens@gmail.com"
 type: software
-version: "0.10.1"
-date-released: "2026-04-20"
+version: "0.10.2"
+date-released: "2026-04-21"
 license: MIT
 repository-code: "https://github.com/stffns/snapvec"
 url: "https://stffns.github.io/snapvec/"

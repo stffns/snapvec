@@ -17,12 +17,17 @@ jobs:
             cibw_archs: "x86_64"
           - os: ubuntu-24.04-arm
             cibw_archs: "aarch64"
-          - os: macos-13
-            cibw_archs: "x86_64"
           - os: macos-14
             cibw_archs: "arm64"
           - os: windows-latest
             cibw_archs: "AMD64"
+        # macos-13 (Intel Mac, x86_64) is intentionally omitted: the
+        # GitHub-hosted macos-13 runner pool was saturated for ~45
+        # minutes during the v0.10.1 release attempt and eventually
+        # timed out.  Apple Silicon has dominated new Mac sales for
+        # 4+ years; Intel Mac users can install from the sdist
+        # (requires `brew install libomp` + a C compiler) or run the
+        # x86_64 wheel under Rosetta.  Re-enabling is one matrix entry.
     steps:
       - uses: actions/checkout@v4
 
