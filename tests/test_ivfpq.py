@@ -632,3 +632,74 @@ def test_stats_shape() -> None:
     assert s["cluster_size_min"] >= 0
     assert s["cluster_size_max"] > 0
     assert s["default_nprobe"] == 1
+
+
+# ──────────────────────────────────────────────────────────────────── #
+# early_stop                                                             #
+# ──────────────────────────────────────────────────────────────────── #
+
+
+def _early_stop_corpus(
+    n: int = 500, d: int = 32, seed: int = 0,
+) -> tuple[IVFPQSnapIndex, np.ndarray, np.ndarray]:
+    corpus = _clustered(n, d, n_clusters=16, seed=seed)
+    corpus /= np.linalg.norm(corpus, axis=1, keepdims=True) + 1e-12
+    queries = _clustered(10, d, n_clusters=16, seed=seed + 1)
+    queries /= np.linalg.norm(queries, axis=1, keepdims=True) + 1e-12
+    idx = IVFPQSnapIndex(
+        dim=d, nlist=16, M=4, K=64, normalized=True, seed=0,
+    )
+    idx.fit(corpus)
+    idx.add_batch(list(range(n)), corpus)
+    return idx, corpus, queries
+
+
+def test_early_stop_matches_full_scan_at_full_nprobe() -> None:
+    """With nprobe=nlist (every cluster visited) and a tight ground
+    truth, early_stop must return the same ids as the non-early path
+    -- the bound is a strict upper bound, so it can never discard a
+    legitimate hit that hasn't been scored yet.
+    """
+    idx, _corpus, queries = _early_stop_corpus()
+    for q in queries:
+        full = idx.search(q, k=5, nprobe=16)
+        early = idx.search(q, k=5, nprobe=16, early_stop=True)
+        # same ids in the same order
+        assert [h[0] for h in full] == [h[0] for h in early]
+
+
+def test_early_stop_rejects_unnormalized_index() -> None:
+    corpus = _clustered(200, 32, n_clusters=8, seed=1)
+    idx = IVFPQSnapIndex(
+        dim=32, nlist=8, M=4, K=32, normalized=False, seed=0,
+    )
+    idx.fit(corpus)
+    idx.add_batch(list(range(200)), corpus)
+    q = corpus[0]
+    with pytest.raises(ValueError, match="normalized=True"):
+        idx.search(q, k=5, early_stop=True)
+
+
+def test_early_stop_rejects_rerank_candidates() -> None:
+    idx, _corpus, queries = _early_stop_corpus()
+    with pytest.raises(ValueError, match="rerank_candidates"):
+        idx.search(queries[0], k=5, rerank_candidates=50, early_stop=True)
+
+
+def test_early_stop_empty_index_returns_empty() -> None:
+    idx = IVFPQSnapIndex(
+        dim=32, nlist=8, M=4, K=32, normalized=True, seed=0,
+    )
+    corpus = _clustered(100, 32, n_clusters=4, seed=0)
+    corpus /= np.linalg.norm(corpus, axis=1, keepdims=True) + 1e-12
+    idx.fit(corpus)
+    # never call add_batch
+    q = corpus[0]
+    assert idx.search(q, k=5, early_stop=True) == []
+
+
+def test_early_stop_respects_filter_ids() -> None:
+    idx, _corpus, queries = _early_stop_corpus()
+    filter_ids = set(range(100))
+    hits = idx.search(queries[0], k=5, nprobe=16, filter_ids=filter_ids, early_stop=True)
+    assert all(h[0] in filter_ids for h in hits)

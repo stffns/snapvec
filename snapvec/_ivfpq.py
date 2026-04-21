@@ -595,6 +595,7 @@ class IVFPQSnapIndex(FreezableIndex):
         nprobe: int | None = None,
         rerank_candidates: int | None = None,
         filter_ids: set[Any] | None = None,
+        early_stop: bool = False,
     ) -> list[tuple[Any, float]]:
         """Approximate top-k via IVF probing + residual PQ ADC.
 
@@ -631,10 +632,34 @@ class IVFPQSnapIndex(FreezableIndex):
             Unknown ids in ``filter_ids`` are silently dropped.  An
             entirely-unknown filter returns ``[]``.  A very sparse
             filter may need a larger ``nprobe`` to surface ``k`` hits.
+        early_stop : bool, default False
+            When True, visit probed clusters in descending coarse-dot
+            order and stop as soon as the next cluster's best possible
+            score (coarse dot + max residual bound) falls below the
+            current k-th score.  Saves work when the top-k is
+            concentrated in a few early clusters; never hurts recall
+            (worst case it visits the same ``nprobe`` clusters).
+
+            Requires ``normalized=True`` and ``rerank_candidates=None``
+            (the bound assumes unit-norm vectors and does not compose
+            with the float16 rerank path).  Incompatible configurations
+            raise ``ValueError``.
         """
         self._require_fitted()
         if k < 1:
             raise ValueError(f"k must be >= 1; got {k}")
+        if early_stop:
+            if not self.normalized:
+                raise ValueError(
+                    "early_stop=True requires normalized=True at index "
+                    "construction (the bound assumes unit-norm vectors)."
+                )
+            if rerank_candidates is not None:
+                raise ValueError(
+                    "early_stop=True is not supported with "
+                    "rerank_candidates (the rerank pool needs all probed "
+                    "candidates, not the early-truncated top-k)."
+                )
         if rerank_candidates is not None:
             if not self.keep_full_precision:
                 raise ValueError(
@@ -685,6 +710,10 @@ class IVFPQSnapIndex(FreezableIndex):
         lut = lut.squeeze(-1)                              # (M, K)
 
         if rerank_candidates is None:
+            if early_stop:
+                return self._score_one_early_stop(
+                    probe, coarse_dot, lut, k, filter_rows,
+                )
             return self._score_one(probe, coarse_dot, lut, k, filter_rows)
         return self._score_one_with_rerank(
             probe, coarse_dot, lut, q_pre, k, rerank_candidates, filter_rows,
@@ -828,6 +857,102 @@ class IVFPQSnapIndex(FreezableIndex):
         return [
             (self._ids_by_row[int(row_idx[i])], float(scores[i]))
             for i in top
+        ]
+
+    _EARLY_STOP_CHUNK: int = 32
+
+    def _score_one_early_stop(
+        self,
+        probe: NDArray[np.int64],
+        coarse_dot: NDArray[np.float32],
+        lut: NDArray[np.float32],
+        k: int,
+        filter_rows: NDArray[np.int64] | None = None,
+    ) -> list[tuple[Any, float]]:
+        """Chunked scoring with an upper-bound short-circuit.
+
+        Visits probed clusters in descending coarse-dot order, in
+        chunks of ``_EARLY_STOP_CHUNK``.  One ``fused_gather_adc`` call
+        per chunk keeps Python dispatch overhead low -- per-cluster
+        dispatch is the dominant cost for the naive one-at-a-time
+        variant at large nprobe.  After each chunk, computes an upper
+        bound on any remaining cluster's best score::
+
+            upper_bound = coarse_dot[next_unprocessed] + max_residual
+
+        where ``max_residual = sum_j max_k lut[j, k]`` is the largest
+        possible PQ residual contribution (the query is unit-norm so
+        ``score = coarse_dot + residual`` is all we need to bound).
+        When that upper bound falls below the current k-th score and
+        we have filled k slots, the remaining probes cannot improve
+        the result -- stop.
+
+        The bound assumes unit-norm vectors, hence the
+        ``normalized=True`` requirement in ``search()``.
+        """
+        # Rank probes in descending coarse-dot.  ``probe`` came from
+        # ``_probe_topn`` which already picks the best nprobe clusters,
+        # but not necessarily in sorted order; sort explicitly so the
+        # stop condition sees the tightest remaining upper bound first.
+        probe_coarse = coarse_dot[probe]
+        order = np.argsort(-probe_coarse, kind="stable")
+        probe = probe[order]
+        probe_coarse = probe_coarse[order]
+
+        # sum_j max_k lut[j, k] is the single-query residual upper
+        # bound.  ~M*K floats, computed once.
+        max_residual = float(lut.max(axis=1).sum())
+
+        top_scores = np.full(k, -np.inf, dtype=np.float32)
+        top_rows = np.full(k, -1, dtype=np.int64)
+        filled = 0
+        threshold = -np.inf
+        chunk_size = self._EARLY_STOP_CHUNK
+
+        n_probes = len(probe)
+        for chunk_start in range(0, n_probes, chunk_size):
+            # Check the bound BEFORE running this chunk -- use the
+            # coarse score of the first cluster in the chunk, which is
+            # the tightest upper bound we have for the chunk (probes
+            # sorted descending).
+            if filled >= k and (
+                float(probe_coarse[chunk_start]) + max_residual < threshold
+            ):
+                break
+
+            chunk_end = min(chunk_start + chunk_size, n_probes)
+            chunk_probes = probe[chunk_start:chunk_end]
+
+            # Batched gather for this chunk (single kernel call).
+            scores, row_idx = self._gather_pq_scores(
+                chunk_probes, coarse_dot, lut, _parallel=False,
+            )
+            if filter_rows is not None and len(row_idx) > 0:
+                keep = np.isin(row_idx, filter_rows, assume_unique=True)
+                scores = scores[keep]
+                row_idx = row_idx[keep]
+            if len(scores) == 0:
+                continue
+
+            combined_scores = np.concatenate([top_scores, scores])
+            combined_rows = np.concatenate([top_rows, row_idx])
+            m = min(k, len(combined_scores))
+            keep_idx = np.argpartition(-combined_scores, m - 1)[:m]
+            top_scores = np.full(k, -np.inf, dtype=np.float32)
+            top_rows = np.full(k, -1, dtype=np.int64)
+            top_scores[:m] = combined_scores[keep_idx]
+            top_rows[:m] = combined_rows[keep_idx]
+            filled = min(k, filled + len(scores))
+            if filled >= k:
+                threshold = float(top_scores[top_rows >= 0].min())
+
+        valid = top_rows >= 0
+        final_scores = top_scores[valid]
+        final_rows = top_rows[valid]
+        order_final = np.argsort(-final_scores)
+        return [
+            (self._ids_by_row[int(final_rows[j])], float(final_scores[j]))
+            for j in order_final
         ]
 
     # ──────────────────────────────────────────────────────────────── #

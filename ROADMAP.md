@@ -8,16 +8,11 @@ open work in [issues](https://github.com/stffns/snapvec/issues).
 
 ### Streaming ingest
 
-- **`add_batch` resort cost**: IVFPQSnapIndex currently re-sorts the
-  entire corpus by cluster id on every `add_batch` call (O(N log N)
-  per append).  Acceptable for the documented bulk-ingest-then-search
-  pattern, painful for streaming.  Plan: append-only layout with a
-  periodic compaction phase.
-
-- **`early_stop` for IVF probing**: short-circuit the probe loop once
-  the top-k boundary can no longer be beaten by remaining clusters
-  (using the coarse-centroid score as a cluster upper bound).
-  Benchmark already scaffolded in `experiments/bench_ivf_pq_early_stop.py`.
+- ~~**`add_batch` resort cost**~~ shipped in v0.10.3.  Single-copy
+  merge in IVFPQSnapIndex.add_batch reduces streaming ingest cost
+  by ~18%; growth remains super-linear because cluster-contiguous
+  storage still requires one N-sized memcpy per batch.  True O(1)
+  per row still needs the delta-buffer design below.
 
 ### Recall
 
@@ -27,8 +22,43 @@ open work in [issues](https://github.com/stffns/snapvec/issues).
 
 ### Types
 
-- **mypy strict in CI as a hard gate**.  17 errors remain, all small;
-  cleanup is tracked.
+- ~~**mypy strict in CI as a hard gate**~~ shipped in v0.10.3.
+
+## Parked / explored
+
+### `early_stop` for IVF probing (explored 2026-04-21, negative result on FIQA)
+
+Idea: short-circuit the probe loop once the next cluster's best
+possible score (`coarse_dot + max_residual`) falls below the current
+k-th score.  Implemented in chunks of 32 clusters to amortise
+dispatch overhead.
+
+Measured on BEIR FIQA (N=57,638, BGE-small, M=192, K=256) against
+the batched full-scan:
+
+| nprobe | full ms | early ms | speedup |
+|-------:|--------:|---------:|--------:|
+| 4   | 0.16 | 0.16 | 0.98x |
+| 32  | 0.34 | 0.55 | 0.62x |
+| 256 | 1.09 | 3.43 | 0.32x |
+
+Recall is identical (bound is strict), but early_stop is **slower**
+at every operating point.  Three reasons:
+
+1. Per-chunk `fused_gather_adc` dispatch + Python merge overhead is
+   already substantial relative to the batched kernel's single-call
+   time.
+2. The global `sum_j max_k lut[j, k]` bound is loose on real
+   embeddings -- actual residual scores rarely approach the
+   max-per-subspace product.
+3. FIQA's recall curve is gradual (0.66 at nprobe=4, 0.93 at
+   nprobe=256), indicating top-k is distributed across many
+   clusters -- the stop condition rarely fires.
+
+Code kept in the `feat/ivfpq-early-stop` branch for future reference.
+Revisit when we have a workload with concentrated ground truth (few
+dominant clusters) and/or a tighter per-cluster bound learned at
+`fit()` time.
 
 ## v0.12 (target: August 2026)
 
