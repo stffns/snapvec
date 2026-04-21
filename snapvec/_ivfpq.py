@@ -319,15 +319,11 @@ class IVFPQSnapIndex(FreezableIndex):
                 stacklevel=2,
             )
         if self.use_opq:
-            # Fit rotation on unit-normalised inputs BEFORE preprocess
-            # sees it -- preprocess would try to apply the rotation
-            # that doesn't exist yet.
-            if self.normalized:
-                X_unit = arr
-            else:
-                raw = np.sqrt(np.einsum("ij,ij->i", arr, arr))
-                safe = np.where(raw > 1e-10, raw, np.float32(1.0)).astype(np.float32)
-                X_unit = (arr / safe[:, None]).astype(np.float32)
+            # Fit rotation on unit-normalised inputs.  _preprocess
+            # returns unit vectors and skips the rotation step because
+            # _opq_rotation is still None at this point, so we can
+            # reuse it instead of duplicating the norm code here.
+            X_unit, _ = self._preprocess(arr)
             self._opq_rotation = fit_opq_rotation(X_unit, self.M)
         pre, _ = self._preprocess(arr)
         # 1. Coarse k-means.

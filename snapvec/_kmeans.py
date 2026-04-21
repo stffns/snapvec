@@ -164,8 +164,11 @@ def fit_opq_rotation(
         )
     mean = X.mean(0, keepdims=True)
     X_c = X - mean
-    # (d, d) covariance.  For d up to a few thousand this is cheap.
-    cov = (X_c.T @ X_c).astype(np.float32) / max(len(X), 1)
+    # (d, d) covariance.  Accumulate in float64 to avoid precision
+    # loss at large N (a few million rows), then downcast for the
+    # eigendecomposition which is also happier on float64.
+    X_c64 = X_c.astype(np.float64)
+    cov = (X_c64.T @ X_c64) / max(len(X), 1)
     eigvals, eigvecs = np.linalg.eigh(cov)  # ascending eigvals
     # Sort descending so eigenvector[:, 0] has the largest variance.
     order = np.argsort(-eigvals)
