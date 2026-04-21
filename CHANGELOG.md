@@ -16,10 +16,10 @@ Release-infrastructure patch on top of v0.10.1.  No library changes.
   release run the GitHub-hosted `macos-13` runner pool stayed queued
   for ~45 minutes and was cancelled, blocking the PyPI publish
   (`publish` requires every wheel job to succeed).  Apple Silicon has
-  dominated new Mac sales for 4+ years; Intel Mac users can install
-  from the sdist (requires `brew install libomp` + a C compiler) or
-  run the x86_64 sdist via Rosetta.  Re-adding the row is one matrix
-  entry if GitHub's macos-13 capacity recovers.
+  dominated new Mac sales for 4+ years; Intel Mac users now install
+  from the sdist (requires `brew install libomp` and a C compiler
+  available via Xcode command-line tools).  Re-adding the row is one
+  matrix entry if GitHub's macos-13 capacity recovers.
 
 The v0.10.0 and v0.10.1 tags exist in git but never produced PyPI
 artifacts; 0.10.2 is the first version actually published.
