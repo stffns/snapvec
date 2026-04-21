@@ -960,6 +960,11 @@ class IVFPQSnapIndex(FreezableIndex):
             q_pre_all = rht(padded, self.seed)
             # Optimized: ~4x faster than np.linalg.norm(..., axis=1) via einsum
             q_pre_all /= np.sqrt(np.einsum('ij,ij->i', q_pre_all, q_pre_all))[:, np.newaxis] + 1e-12
+        elif self.use_opq and self._opq_rotation is not None:
+            # Apply the learned rotation to every query in the batch
+            # so search_batch stays consistent with search() -- the
+            # single-query path rotates via _preprocess_single.
+            q_pre_all = (Q_unit @ self._opq_rotation).astype(np.float32)
         else:
             q_pre_all = Q_unit.astype(np.float32)
 
@@ -1108,10 +1113,11 @@ class IVFPQSnapIndex(FreezableIndex):
             f.write(self._coarse.tobytes())
             f.write(self._codebooks.tobytes())
             if self.use_opq:
-                # (pdim, pdim) float32 rotation.  Placed after the
-                # codebooks (and before offsets) so v4 readers that
-                # didn't know about OPQ simply never see the block --
-                # the flag check gates the read.
+                # (pdim, pdim) float32 rotation, placed after the
+                # codebooks and before offsets.  v5 readers gate the
+                # block on _FLAG_USE_OPQ; v4 and older readers refuse
+                # v5 files at the version check above, so they never
+                # reach this position.
                 assert self._opq_rotation is not None
                 f.write(self._opq_rotation.tobytes())
             f.write(self._offsets.tobytes())

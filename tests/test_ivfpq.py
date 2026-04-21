@@ -672,7 +672,38 @@ def test_ivfpq_opq_round_trip(tmp_path: Path) -> None:
     assert loaded._opq_rotation is not None
     np.testing.assert_array_equal(loaded._opq_rotation, idx._opq_rotation)
     q = corpus[0]
-    assert idx.search(q, k=5, nprobe=4) == loaded.search(q, k=5, nprobe=4)
+    before = idx.search(q, k=5, nprobe=4)
+    after = loaded.search(q, k=5, nprobe=4)
+    assert [h[0] for h in before] == [h[0] for h in after]
+    np.testing.assert_allclose(
+        [h[1] for h in before], [h[1] for h in after], atol=1e-5,
+    )
+
+
+def test_ivfpq_opq_search_batch_matches_search() -> None:
+    """search_batch() must rotate queries the same way search() does
+    when use_opq=True -- both paths go through the learned rotation.
+    Regression guard for the bug Gemini caught in PR #64 review where
+    search_batch was OPQ-blind and silently diverged from search."""
+    corpus = _clustered(500, 32, n_clusters=8, seed=70)
+    queries = _clustered(10, 32, n_clusters=8, seed=71)
+    idx = IVFPQSnapIndex(
+        dim=32, nlist=8, M=8, K=16, normalized=True, use_opq=True, seed=0,
+    )
+    idx.fit(corpus)
+    idx.add_batch(list(range(500)), corpus)
+
+    serial = [idx.search(q, k=5, nprobe=4) for q in queries]
+    batched = idx.search_batch(queries, k=5, nprobe=4, num_threads=1)
+    for i, (s, b) in enumerate(zip(serial, batched)):
+        assert [h[0] for h in s] == [h[0] for h in b], (
+            f"OPQ search_batch ids diverge from search at query {i}: "
+            f"{[h[0] for h in s]} vs {[h[0] for h in b]}"
+        )
+        np.testing.assert_allclose(
+            [h[1] for h in s], [h[1] for h in b], atol=1e-5,
+            err_msg=f"OPQ search_batch scores diverge at query {i}",
+        )
 
 
 def test_ivfpq_opq_recall_not_worse_than_baseline() -> None:

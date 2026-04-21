@@ -284,14 +284,20 @@ def test_opq_round_trip_preserves_rotation(tmp_path: Path) -> None:
     assert loaded.use_opq is True
     assert loaded._opq_rotation is not None
     np.testing.assert_array_equal(loaded._opq_rotation, idx._opq_rotation)
-    # Search results identical.
+    # Search results match (ids exactly, scores within float32 noise
+    # -- exact equality would be flaky across BLAS implementations).
     q = corpus[0]
-    assert idx.search(q, k=5) == loaded.search(q, k=5)
+    before = idx.search(q, k=5)
+    after = loaded.search(q, k=5)
+    assert [h[0] for h in before] == [h[0] for h in after]
+    np.testing.assert_allclose(
+        [h[1] for h in before], [h[1] for h in after], atol=1e-5,
+    )
 
 
 def test_opq_search_determinism() -> None:
     """Two fits with same seed produce identical OPQ rotations and
-    identical search results."""
+    matching search results."""
     corpus = _unit_gaussian(500, 32, seed=3)
     idx1 = PQSnapIndex(dim=32, M=8, K=16, normalized=True, use_opq=True, seed=7)
     idx2 = PQSnapIndex(dim=32, M=8, K=16, normalized=True, use_opq=True, seed=7)
@@ -301,4 +307,9 @@ def test_opq_search_determinism() -> None:
     idx1.add_batch(list(range(500)), corpus)
     idx2.add_batch(list(range(500)), corpus)
     q = _unit_gaussian(1, 32, seed=30)[0]
-    assert idx1.search(q, k=5) == idx2.search(q, k=5)
+    hits1 = idx1.search(q, k=5)
+    hits2 = idx2.search(q, k=5)
+    assert [h[0] for h in hits1] == [h[0] for h in hits2]
+    np.testing.assert_allclose(
+        [h[1] for h in hits1], [h[1] for h in hits2], atol=1e-5,
+    )
