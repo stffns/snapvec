@@ -6,6 +6,49 @@ the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.10.3] -- 2026-04-21
+
+Performance patch release.  No API changes.  Byte-identical on-disk
+output for the same seed and inputs (determinism tests still pass).
+
+### Performance
+
+- **`IVFPQSnapIndex.add_batch` streaming ingest is ~18% faster** (PR #61).
+  The old path allocated two N-sized copies of `_codes` per call (via
+  `np.concatenate` then a second `[:, order]` after argsort).  The
+  new path sorts just the new batch by cluster id and then merges it
+  into the cluster-contiguous layout with a single allocation + a
+  per-cluster contiguous copy loop -- one N-sized memcpy per call
+  instead of two, and the copy is a straight stream instead of a
+  fancy-index scatter.
+
+  Measured on a 50k-row streaming ingest, `batch_size=500`,
+  `dim=128`, `nlist=32`, `M=16`:
+
+  | Point | Before | After | Delta |
+  |-------|-------:|------:|------:|
+  | First batch (N=500) | 2.46 us/row | 1.75 us/row | -29% |
+  | Last batch (N=50k) | 8.02 us/row | 6.15 us/row | -23% |
+  | Total 50k ingest | 243 ms | 200 ms | -18% |
+
+  The last-batch-vs-first-batch growth ratio is still ~3x because
+  the remaining copy is fundamental to the cluster-contiguous
+  layout; truly O(1)-per-row streaming needs a delta-buffer design
+  (ROADMAP v0.12).
+
+- **Row-wise L2 norm via `einsum` instead of `np.linalg.norm`**
+  (PR #59, 7 call sites across `_index.py`, `_ivfpq.py`, `_pq.py`,
+  `_residual.py`).  `np.sqrt(np.einsum('ij,ij->i', X, X))` is 2.4x
+  faster than `np.linalg.norm(X, axis=1)` in isolation on a
+  (10000, 384) float32 matrix (0.72 ms -> 0.30 ms per call).  In
+  practice the end-to-end delta on every measured path is within
+  noise (+/- 1% over `SnapIndex.add_batch`, `PQSnapIndex.add_batch`,
+  `ResidualSnapIndex.add_batch`, `IVFPQSnapIndex.search_batch`)
+  because the norm is a small fraction of each path (RHT + codebook
+  search dominate).  Kept for correctness consistency and for
+  callers whose hot path does dominate on batch normalisation.  See
+  `experiments/bench_bolt_einsum_impact.py` for the measurement.
+
 ## [0.10.2] -- 2026-04-21
 
 Release-infrastructure patch on top of v0.10.1.  No library changes.
