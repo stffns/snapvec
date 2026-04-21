@@ -182,33 +182,44 @@ def run_snapvec() -> list[dict]:
         library_version=snapvec_version,
     ))
 
-    # pure PQ, matched to FAISS at both M operating points so the
-    # two-vs-two comparison is clean.
+    # Pure PQ, both M operating points x OPQ on/off.  M=FAISS_M is the
+    # matched-budget row against FAISS IVFPQ at the aggressive corner;
+    # M=SNAPVEC_M is the matched row at the flagship corner.  Four
+    # snapvec rows total vs two FAISS rows -- the OPQ axis is extra
+    # per operating point, not an apples-to-apples mirror of FAISS.
     for m in (SNAPVEC_M, FAISS_M):
-        idx2 = IVFPQSnapIndex(
-            dim=dim, nlist=NLIST, M=m, K=PQ_K,
-            normalized=True, seed=0,
-        )
-        t0 = perf_counter()
-        idx2.fit(corpus, kmeans_iters=15)
-        idx2.add_batch(list(range(len(corpus))), corpus)
-        build_m = perf_counter() - t0
-        pred_m = np.array([
-            [i for i, _ in idx2.search(q, k=K, nprobe=NPROBE)] for q in queries
-        ])
-        p50_m, p99_m = time_per_query(
-            lambda q: idx2.search(q, k=K, nprobe=NPROBE), queries,
-        )
-        disk_m = disk_size(lambda p: idx2.save(p))
-        idx2.close()
-        tag = "[matched-budget vs FAISS]" if m == FAISS_M else ""
-        results.append(dict(
-            name=f"snapvec IVFPQ no rerank (M={m}, nprobe={NPROBE})",
-            recall=recall_at_k(pred_m, truth, K),
-            p50_us=p50_m, p99_us=p99_m, disk_bytes=disk_m, build_s=build_m,
-            notes=f"PQ only {tag}".strip(),
-            library_version=snapvec_version,
-        ))
+        for use_opq in (False, True):
+            idx2 = IVFPQSnapIndex(
+                dim=dim, nlist=NLIST, M=m, K=PQ_K,
+                normalized=True, use_opq=use_opq, seed=0,
+            )
+            t0 = perf_counter()
+            idx2.fit(corpus, kmeans_iters=15)
+            idx2.add_batch(list(range(len(corpus))), corpus)
+            build_m = perf_counter() - t0
+            pred_m = np.array([
+                [i for i, _ in idx2.search(q, k=K, nprobe=NPROBE)]
+                for q in queries
+            ])
+            p50_m, p99_m = time_per_query(
+                lambda q: idx2.search(q, k=K, nprobe=NPROBE), queries,
+            )
+            disk_m = disk_size(lambda p: idx2.save(p))
+            idx2.close()
+            opq_suffix = " + OPQ" if use_opq else ""
+            note_tag = (
+                " [matched-budget vs FAISS]" if m == FAISS_M else ""
+            )
+            results.append(dict(
+                name=(
+                    f"snapvec IVFPQ no rerank (M={m}, nprobe={NPROBE})"
+                    f"{opq_suffix}"
+                ),
+                recall=recall_at_k(pred_m, truth, K),
+                p50_us=p50_m, p99_us=p99_m, disk_bytes=disk_m, build_s=build_m,
+                notes=f"PQ only{note_tag}",
+                library_version=snapvec_version,
+            ))
     return results
 
 
