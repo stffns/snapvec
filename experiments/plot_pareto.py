@@ -1,11 +1,13 @@
 """Pareto plot for the unified competitive benchmark.
 
-Reads the rows currently published in docs/benchmarks.md's head-to-head
-table (hard-coded here so the plot generator has no external deps
-beyond matplotlib).  Emits a single PNG showing recall@10 vs p50
-latency, with point size proportional to on-disk footprint and
-colour-coded by backend family.  Pareto-dominant rows are annotated
-inline.
+Picks the rows from docs/benchmarks.md that define the Pareto
+frontier + the headline matched-budget comparisons.  The very-slow
+SnapIndex 3-bit/2-bit scalar rows are intentionally omitted: they
+would extend the x-axis by another order of magnitude without
+adding a Pareto-relevant point on this corpus.  Values are
+hard-coded here so the plot generator has no external dependency
+beyond matplotlib; regenerate after re-running the competitive
+bench.
 
 Run with: python experiments/plot_pareto.py docs/_static/pareto.png
 """
@@ -53,8 +55,13 @@ HIGHLIGHT = {
 def main(out: Path) -> None:
     fig, ax = plt.subplots(figsize=(9, 6))
 
-    # Draw a shaded 'flagship corner' (recall >= 0.89, p50 <= 500us).
-    ax.axvspan(100, 500, ymin=0, ymax=1, color="#fff4e0", alpha=0.4, zorder=0)
+    # Shade the flagship corner (p50 <= 500 us AND recall >= 0.89):
+    # a rectangle, not a full column, so the band visually matches
+    # the claim and doesn't sweep the low-recall rows too.
+    ax.add_patch(plt.Rectangle(
+        (100, 0.89), 400, 0.12,
+        facecolor="#fff4e0", alpha=0.4, zorder=0,
+    ))
 
     for label, family, recall, p50, disk, marker in ROWS:
         # Point area scales with disk (sqrt so the sqlite/hnswlib rows
@@ -99,7 +106,10 @@ def main(out: Path) -> None:
         fontsize=10,
     )
 
-    # Legend: one entry per family + shape legend.
+    # Legend: one entry per backend family.  Shapes are not encoded
+    # in the legend (they are a visual accent per config; the
+    # labelled inline annotations name each row) so readers are not
+    # left hunting for a marker key that doesn't exist.
     family_handles = [
         Patch(color=c, label=name) for name, c in [
             ("snapvec", FAMILY_COLOR["snapvec"]),

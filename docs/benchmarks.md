@@ -41,8 +41,9 @@ are the frontier; anything further down-and-right is dominated.
 
     **Hardware.** Apple M4 Pro, 12 cores, 24 GB RAM, macOS 14.
     Every backend pinned to a single thread
-    (`faiss.omp_set_num_threads(1)`, `hnswlib.set_num_threads(1)`,
-    snapvec default) for apples-to-apples per-query latency.
+    (`faiss.omp_set_num_threads(1)` at module level, and
+    `idx.set_num_threads(1)` on the hnswlib instance; snapvec default
+    is already serial) for apples-to-apples per-query latency.
     GC disabled inside the timing loop.  p50 and p99 reported
     across the query set (median, not mean, to shrug off outliers).
 

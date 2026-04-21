@@ -19,7 +19,7 @@ point on the accuracy / storage / latency frontier:
 | `PQSnapIndex` | one-off `fit` | 24-96x | 0.95 | Modern LLM embeddings, aggressive compression |
 | `IVFPQSnapIndex` | one-off `fit` | 24-96x | 0.98 | Sub-linear search at scale (N > 100k) |
 
-![Pareto frontier](docs/_static/pareto.png)
+![Pareto frontier](https://raw.githubusercontent.com/stffns/snapvec/main/docs/_static/pareto.png)
 
 Three numbers from v0.11.0 on BEIR FIQA (N = 57,638, dim = 384
 BGE-small, Apple M4 Pro, single-thread, 200 queries, point area
