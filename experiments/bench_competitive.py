@@ -182,10 +182,11 @@ def run_snapvec() -> list[dict]:
         library_version=snapvec_version,
     ))
 
-    # pure PQ, matched to FAISS at both M operating points so the
-    # two-vs-two comparison is clean.  Each M is run with and without
-    # the OPQ rotation (v0.11.0+) so readers see the operating points
-    # side by side.
+    # Pure PQ, both M operating points x OPQ on/off.  M=FAISS_M is the
+    # matched-budget row against FAISS IVFPQ at the aggressive corner;
+    # M=SNAPVEC_M is the matched row at the flagship corner.  Four
+    # snapvec rows total vs two FAISS rows -- the OPQ axis is extra
+    # per operating point, not an apples-to-apples mirror of FAISS.
     for m in (SNAPVEC_M, FAISS_M):
         for use_opq in (False, True):
             idx2 = IVFPQSnapIndex(
@@ -205,13 +206,10 @@ def run_snapvec() -> list[dict]:
             )
             disk_m = disk_size(lambda p: idx2.save(p))
             idx2.close()
-            tag_parts: list[str] = []
-            if m == FAISS_M:
-                tag_parts.append("matched-budget vs FAISS")
-            if use_opq:
-                tag_parts.append("OPQ")
-            tag = " + ".join(tag_parts)
             opq_suffix = " + OPQ" if use_opq else ""
+            note_tag = (
+                " [matched-budget vs FAISS]" if m == FAISS_M else ""
+            )
             results.append(dict(
                 name=(
                     f"snapvec IVFPQ no rerank (M={m}, nprobe={NPROBE})"
@@ -219,7 +217,7 @@ def run_snapvec() -> list[dict]:
                 ),
                 recall=recall_at_k(pred_m, truth, K),
                 p50_us=p50_m, p99_us=p99_m, disk_bytes=disk_m, build_s=build_m,
-                notes=f"PQ only [{tag}]" if tag else "PQ only",
+                notes=f"PQ only{note_tag}",
                 library_version=snapvec_version,
             ))
     return results
