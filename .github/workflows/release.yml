@@ -49,7 +49,7 @@ jobs:
           CIBW_TEST_REQUIRES: "pytest hypothesis>=6.100"
           CIBW_TEST_COMMAND: "pytest {project}/tests -q"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: wheels-${{ matrix.os }}-${{ matrix.cibw_archs }}
           path: ./wheelhouse/*.whl
@@ -69,7 +69,7 @@ jobs:
           python -m pip install --upgrade pip build
           python -m build --sdist
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: sdist
           path: dist/*.tar.gz
