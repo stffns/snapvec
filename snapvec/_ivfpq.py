@@ -398,39 +398,96 @@ class IVFPQSnapIndex(FreezableIndex):
                 # the search-time dot product is consistent with.
                 new_full[start:end] = pre
 
-        # Combine with existing state, sort once by cluster id.
-        if self._codes.shape[1] == 0:
-            combined_codes = new_codes
-            combined_asn = new_asn
-            combined_ids_seq: list[Any] = list(ids)
-            combined_norms = new_norms
-            combined_full = new_full
+        # Merge new into the existing cluster-contiguous layout in a
+        # single copy.  The previous implementation concatenated old +
+        # new into a temporary, then re-ordered via argsort -- two
+        # N-sized copies of ``_codes`` per call.  Here we compute the
+        # destination index of every old and new row directly, then
+        # scatter into a freshly allocated result buffer.
+        #
+        # Math: after inserting ``new_counts[c]`` items into cluster
+        # ``c``, every cluster past ``c`` shifts right by that many
+        # positions.  Shift-for-old = cumulative new_counts up to each
+        # old row's cluster; shift-for-new-sorted follows directly from
+        # the sorted cluster-id stream.
+        N_old = self._codes.shape[1]
+
+        if N_old == 0:
+            # Empty index: sort new once and write it in.  No merge
+            # bookkeeping needed.
+            new_order = np.argsort(new_asn, kind="stable")
+            self._codes = new_codes[:, new_order]
+            ids_arr = np.array(list(ids), dtype=object)
+            self._ids_by_row = ids_arr[new_order].tolist()
+            if not self.normalized:
+                self._norms = new_norms[new_order]
+            if self.keep_full_precision:
+                self._full_precision = new_full[new_order]
+            counts = np.bincount(new_asn, minlength=self.nlist)
         else:
-            combined_codes = np.concatenate([self._codes, new_codes], axis=1)
-            combined_asn = np.concatenate(
-                [self._cluster_ids_from_offsets(), new_asn]
-            )
-            combined_ids_seq = self._ids_by_row + list(ids)
-            combined_norms = (
-                new_norms if self.normalized
-                else np.concatenate([self._norms, new_norms])
-            )
-            combined_full = (
-                np.concatenate([self._full_precision, new_full], axis=0)
-                if self.keep_full_precision else new_full
+            old_asn = self._cluster_ids_from_offsets()
+            new_counts = np.bincount(new_asn, minlength=self.nlist)
+            new_batch_offsets = np.concatenate(
+                [[0], np.cumsum(new_counts)]
+            ).astype(np.int64)
+
+            # old rows: each stays within its cluster but shifts right
+            # by the count of new items inserted in earlier clusters.
+            old_dst = np.arange(N_old, dtype=np.int64) + new_batch_offsets[old_asn]
+
+            # new rows, sorted by cluster id, land immediately after
+            # their cluster's old tail.  start_of_new_block[c] is the
+            # position where cluster c's new items begin in the
+            # merged result.  Adding local_pos within cluster gives
+            # each sorted-new row its final destination.
+            new_order = np.argsort(new_asn, kind="stable")
+            new_asn_sorted = new_asn[new_order]
+            # shifted_old_ends[c] = old_offsets[c+1] + new_batch_offsets[c+1]
+            # so start_of_new_block[c] = shifted_old_ends[c] - new_counts[c]
+            shifted_old_ends = (
+                self._offsets[1:] + new_batch_offsets[1:]
+            ).astype(np.int64)
+            local_pos = np.arange(
+                len(new_order), dtype=np.int64,
+            ) - new_batch_offsets[new_asn_sorted]
+            new_dst = (
+                shifted_old_ends[new_asn_sorted]
+                - new_counts[new_asn_sorted]
+                + local_pos
             )
 
-        order = np.argsort(combined_asn, kind="stable")
-        self._codes = combined_codes[:, order]
-        # Reorder ids via numpy object array → bulk gather in C, no
-        # Python list comprehension over N elements.
-        ids_arr = np.array(combined_ids_seq, dtype=object)
-        self._ids_by_row = ids_arr[order].tolist()
-        if not self.normalized:
-            self._norms = combined_norms[order]
-        if self.keep_full_precision:
-            self._full_precision = combined_full[order]
-        counts = np.bincount(combined_asn, minlength=self.nlist)
+            # Scatter into the result buffers in one pass.
+            N_total = N_old + n
+            new_codes_sorted = new_codes[:, new_order]
+            combined_codes = np.empty((self.M, N_total), dtype=np.uint8)
+            combined_codes[:, old_dst] = self._codes
+            combined_codes[:, new_dst] = new_codes_sorted
+            self._codes = combined_codes
+
+            # Ids: bulk-gather old + new in destination order.
+            combined_ids = np.empty(N_total, dtype=object)
+            old_ids_arr = np.array(self._ids_by_row, dtype=object)
+            combined_ids[old_dst] = old_ids_arr
+            new_ids_arr = np.array(list(ids), dtype=object)[new_order]
+            combined_ids[new_dst] = new_ids_arr
+            self._ids_by_row = combined_ids.tolist()
+
+            if not self.normalized:
+                combined_norms = np.empty(N_total, dtype=np.float32)
+                combined_norms[old_dst] = self._norms
+                combined_norms[new_dst] = new_norms[new_order]
+                self._norms = combined_norms
+
+            if self.keep_full_precision:
+                combined_full = np.empty((N_total, self._pdim), dtype=np.float16)
+                combined_full[old_dst] = self._full_precision
+                combined_full[new_dst] = new_full[new_order]
+                self._full_precision = combined_full
+
+            # Count = old_count + new_count per cluster.
+            old_counts = np.diff(self._offsets).astype(np.int64)
+            counts = old_counts + new_counts
+
         self._offsets = np.concatenate([[0], np.cumsum(counts)]).astype(np.int64)
         self._id_to_row = dict(zip(self._ids_by_row, range(len(self._ids_by_row))))
 
