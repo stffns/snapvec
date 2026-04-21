@@ -398,39 +398,107 @@ class IVFPQSnapIndex(FreezableIndex):
                 # the search-time dot product is consistent with.
                 new_full[start:end] = pre
 
-        # Combine with existing state, sort once by cluster id.
-        if self._codes.shape[1] == 0:
-            combined_codes = new_codes
-            combined_asn = new_asn
-            combined_ids_seq: list[Any] = list(ids)
-            combined_norms = new_norms
-            combined_full = new_full
+        # Merge new into the existing cluster-contiguous layout with a
+        # single allocation.  For each cluster c, copy the existing
+        # (contiguous) slice of old rows, followed by the new rows
+        # landing in that cluster.  Both copies are contiguous memcpy,
+        # which is materially faster on modern CPUs than the scatter
+        # via fancy indexing we used in the first iteration of this
+        # optimisation (prefetcher, SIMD, single-stream bandwidth).
+        N_old = self._codes.shape[1]
+
+        if N_old == 0:
+            # Empty index: sort new once and write it in.  No merge
+            # bookkeeping needed.
+            new_order = np.argsort(new_asn, kind="stable")
+            self._codes = new_codes[:, new_order]
+            ids_arr = np.array(list(ids), dtype=object)
+            self._ids_by_row = ids_arr[new_order].tolist()
+            if not self.normalized:
+                self._norms = new_norms[new_order]
+            if self.keep_full_precision:
+                self._full_precision = new_full[new_order]
+            counts = np.bincount(new_asn, minlength=self.nlist)
         else:
-            combined_codes = np.concatenate([self._codes, new_codes], axis=1)
-            combined_asn = np.concatenate(
-                [self._cluster_ids_from_offsets(), new_asn]
+            # Sort the new batch by cluster id so each cluster's new
+            # items are a contiguous run; that lets the per-cluster
+            # copy below use a single slice per side.
+            new_order = np.argsort(new_asn, kind="stable")
+            new_codes_sorted = new_codes[:, new_order]
+            new_norms_sorted = (
+                new_norms[new_order] if not self.normalized else new_norms
             )
-            combined_ids_seq = self._ids_by_row + list(ids)
+            new_full_sorted = (
+                new_full[new_order] if self.keep_full_precision else new_full
+            )
+            ids_sorted = np.array(list(ids), dtype=object)[new_order]
+
+            new_counts = np.bincount(new_asn, minlength=self.nlist)
+            new_batch_offsets = np.concatenate(
+                [[0], np.cumsum(new_counts)]
+            ).astype(np.int64)
+            old_counts = np.diff(self._offsets).astype(np.int64)
+            counts = old_counts + new_counts
+
+            N_total = N_old + n
+            combined_codes = np.empty((self.M, N_total), dtype=np.uint8)
+            combined_ids = np.empty(N_total, dtype=object)
             combined_norms = (
-                new_norms if self.normalized
-                else np.concatenate([self._norms, new_norms])
+                np.empty(N_total, dtype=np.float32)
+                if not self.normalized else None
             )
             combined_full = (
-                np.concatenate([self._full_precision, new_full], axis=0)
-                if self.keep_full_precision else new_full
+                np.empty((N_total, self._pdim), dtype=np.float16)
+                if self.keep_full_precision else None
             )
 
-        order = np.argsort(combined_asn, kind="stable")
-        self._codes = combined_codes[:, order]
-        # Reorder ids via numpy object array → bulk gather in C, no
-        # Python list comprehension over N elements.
-        ids_arr = np.array(combined_ids_seq, dtype=object)
-        self._ids_by_row = ids_arr[order].tolist()
-        if not self.normalized:
-            self._norms = combined_norms[order]
-        if self.keep_full_precision:
-            self._full_precision = combined_full[order]
-        counts = np.bincount(combined_asn, minlength=self.nlist)
+            old_ids_arr = np.array(self._ids_by_row, dtype=object)
+            write_pos = 0
+            for c in range(self.nlist):
+                old_s = int(self._offsets[c])
+                old_n = int(old_counts[c])
+                new_s = int(new_batch_offsets[c])
+                new_n = int(new_counts[c])
+                if old_n:
+                    combined_codes[:, write_pos : write_pos + old_n] = (
+                        self._codes[:, old_s : old_s + old_n]
+                    )
+                    combined_ids[write_pos : write_pos + old_n] = (
+                        old_ids_arr[old_s : old_s + old_n]
+                    )
+                    if combined_norms is not None:
+                        combined_norms[write_pos : write_pos + old_n] = (
+                            self._norms[old_s : old_s + old_n]
+                        )
+                    if combined_full is not None:
+                        combined_full[write_pos : write_pos + old_n] = (
+                            self._full_precision[old_s : old_s + old_n]
+                        )
+                    write_pos += old_n
+                if new_n:
+                    combined_codes[:, write_pos : write_pos + new_n] = (
+                        new_codes_sorted[:, new_s : new_s + new_n]
+                    )
+                    combined_ids[write_pos : write_pos + new_n] = (
+                        ids_sorted[new_s : new_s + new_n]
+                    )
+                    if combined_norms is not None:
+                        combined_norms[write_pos : write_pos + new_n] = (
+                            new_norms_sorted[new_s : new_s + new_n]
+                        )
+                    if combined_full is not None:
+                        combined_full[write_pos : write_pos + new_n] = (
+                            new_full_sorted[new_s : new_s + new_n]
+                        )
+                    write_pos += new_n
+
+            self._codes = combined_codes
+            self._ids_by_row = combined_ids.tolist()
+            if combined_norms is not None:
+                self._norms = combined_norms
+            if combined_full is not None:
+                self._full_precision = combined_full
+
         self._offsets = np.concatenate([[0], np.cumsum(counts)]).astype(np.int64)
         self._id_to_row = dict(zip(self._ids_by_row, range(len(self._ids_by_row))))
 
