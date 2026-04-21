@@ -248,3 +248,68 @@ def test_kmeans_pp_init_duplicated_points() -> None:
     idx.fit(corpus)  # should not raise even though most pairs are identical
     idx.add_batch(list(range(n)), corpus)
     assert len(idx) == n
+
+
+# ──────────────────────────────────────────────────────────────────── #
+# OPQ rotation                                                           #
+# ──────────────────────────────────────────────────────────────────── #
+
+
+def test_opq_fit_stores_rotation() -> None:
+    corpus = _unit_gaussian(500, 32, seed=1)
+    idx = PQSnapIndex(dim=32, M=8, K=16, normalized=True, use_opq=True, seed=0)
+    assert idx._opq_rotation is None
+    idx.fit(corpus)
+    assert idx._opq_rotation is not None
+    R = idx._opq_rotation
+    assert R.shape == (32, 32)
+    # R is orthogonal: R^T R = I
+    RT_R = R.T @ R
+    np.testing.assert_allclose(RT_R, np.eye(32), atol=1e-4)
+
+
+def test_opq_and_rht_mutually_exclusive() -> None:
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        PQSnapIndex(dim=32, M=8, K=16, use_opq=True, use_rht=True)
+
+
+def test_opq_round_trip_preserves_rotation(tmp_path: Path) -> None:
+    corpus = _unit_gaussian(500, 32, seed=2)
+    idx = PQSnapIndex(dim=32, M=8, K=16, normalized=True, use_opq=True, seed=0)
+    idx.fit(corpus)
+    idx.add_batch(list(range(500)), corpus)
+    path = tmp_path / "opq.snpq"
+    idx.save(path)
+    loaded = PQSnapIndex.load(path)
+    assert loaded.use_opq is True
+    assert loaded._opq_rotation is not None
+    np.testing.assert_array_equal(loaded._opq_rotation, idx._opq_rotation)
+    # Search results match (ids exactly, scores within float32 noise
+    # -- exact equality would be flaky across BLAS implementations).
+    q = corpus[0]
+    before = idx.search(q, k=5)
+    after = loaded.search(q, k=5)
+    assert [h[0] for h in before] == [h[0] for h in after]
+    np.testing.assert_allclose(
+        [h[1] for h in before], [h[1] for h in after], atol=1e-5,
+    )
+
+
+def test_opq_search_determinism() -> None:
+    """Two fits with same seed produce identical OPQ rotations and
+    matching search results."""
+    corpus = _unit_gaussian(500, 32, seed=3)
+    idx1 = PQSnapIndex(dim=32, M=8, K=16, normalized=True, use_opq=True, seed=7)
+    idx2 = PQSnapIndex(dim=32, M=8, K=16, normalized=True, use_opq=True, seed=7)
+    idx1.fit(corpus)
+    idx2.fit(corpus)
+    np.testing.assert_array_equal(idx1._opq_rotation, idx2._opq_rotation)
+    idx1.add_batch(list(range(500)), corpus)
+    idx2.add_batch(list(range(500)), corpus)
+    q = _unit_gaussian(1, 32, seed=30)[0]
+    hits1 = idx1.search(q, k=5)
+    hits2 = idx2.search(q, k=5)
+    assert [h[0] for h in hits1] == [h[0] for h in hits2]
+    np.testing.assert_allclose(
+        [h[1] for h in hits1], [h[1] for h in hits2], atol=1e-5,
+    )

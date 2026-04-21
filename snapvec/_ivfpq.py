@@ -45,12 +45,17 @@ except ImportError:
     from ._fast_fallback import fused_gather_adc
 from ._file_format import ChecksumWriter, save_with_checksum_atomic, verify_checksum
 from ._freezable import FreezableIndex
-from ._kmeans import assign_l2, kmeans_mse, probe_scores_l2_monotone
+from ._kmeans import (
+    assign_l2,
+    fit_opq_rotation,
+    kmeans_mse,
+    probe_scores_l2_monotone,
+)
 from ._rotation import padded_dim, rht
 
 _MAGIC = b"SNPI"
-_VERSION = 4  # v4: rerank cache stored as float16 (half the storage of v3)
-_LEGACY_VERSIONS = {1, 2, 3}
+_VERSION = 5  # v5: adds optional OPQ rotation block (present iff _FLAG_USE_OPQ)
+_LEGACY_VERSIONS = {1, 2, 3, 4}
 _MAX_ID_BYTES = 0xFFFF
 
 # Standard FAISS rule of thumb for stable coarse k-means: at least
@@ -64,6 +69,7 @@ _FAISS_MIN_RATIO = 30
 _FLAG_NORMALIZED = 1 << 0
 _FLAG_USE_RHT = 1 << 1
 _FLAG_KEEP_FULL_PRECISION = 1 << 2
+_FLAG_USE_OPQ = 1 << 3
 
 
 def _divisors(n: int, lo: int = 2, hi: int = 1024) -> list[int]:
@@ -105,6 +111,12 @@ class IVFPQSnapIndex(FreezableIndex):
         norm is stored.
     use_rht : bool, default False
         Off by default — same rationale as ``PQSnapIndex``.
+    use_opq : bool, default False
+        When True, learn an orthogonal OPQ-P rotation (Ge et al.,
+        2013) during ``fit()`` and apply it to both corpus and
+        queries before the coarse k-means and the residual PQ.
+        Balances per-subspace variance, typically +0.5-2 pp recall
+        at the same bytes/vec.  Mutually exclusive with ``use_rht``.
     """
 
     def __init__(
@@ -117,6 +129,7 @@ class IVFPQSnapIndex(FreezableIndex):
         normalized: bool = False,
         use_rht: bool = False,
         keep_full_precision: bool = False,
+        use_opq: bool = False,
     ) -> None:
         if not (2 <= K <= 256):
             raise ValueError(f"K must be in [2, 256]; got {K}")
@@ -124,6 +137,12 @@ class IVFPQSnapIndex(FreezableIndex):
             raise ValueError(f"nlist must be >= 2; got {nlist}")
         if M < 1:
             raise ValueError(f"M must be >= 1; got {M}")
+        if use_opq and use_rht:
+            raise ValueError(
+                "use_opq and use_rht are mutually exclusive: OPQ learns "
+                "a data-specific rotation during fit(), RHT applies a "
+                "fixed random one.  Pick one."
+            )
 
         pdim = padded_dim(dim) if use_rht else dim
         if pdim % M != 0:
@@ -141,6 +160,9 @@ class IVFPQSnapIndex(FreezableIndex):
         self.normalized = normalized
         self.use_rht = use_rht
         self.keep_full_precision = keep_full_precision
+        self.use_opq = use_opq
+        # (pdim, pdim) OPQ rotation, set in fit() when use_opq=True.
+        self._opq_rotation: NDArray[np.float32] | None = None
 
         self._pdim = pdim
         self._d_sub = pdim // M
@@ -234,6 +256,9 @@ class IVFPQSnapIndex(FreezableIndex):
             # Optimized: ~4x faster than np.linalg.norm(..., axis=1) via einsum
             rot /= np.sqrt(np.einsum('ij,ij->i', rot, rot))[:, np.newaxis] + 1e-12
             return rot.astype(np.float32), norms
+        if self.use_opq and self._opq_rotation is not None:
+            # Rotation is orthogonal, so unit-norm inputs stay unit-norm.
+            return (units @ self._opq_rotation).astype(np.float32), norms
         return units.astype(np.float32), norms
 
     def _preprocess_single(self, q: NDArray[np.float32]) -> NDArray[np.float32]:
@@ -242,13 +267,18 @@ class IVFPQSnapIndex(FreezableIndex):
         if q_norm < 1e-10:
             return np.zeros(self._pdim, dtype=np.float32)
         q_unit = q / q_norm
-        if not self.use_rht:
-            return q_unit.astype(np.float32)
-        padded = np.zeros(self._pdim, dtype=np.float32)
-        padded[: self.dim] = q_unit
-        rot = rht(padded[None, :], self.seed)[0]
-        rot /= np.linalg.norm(rot) + 1e-12
-        return cast("NDArray[np.float32]", rot)
+        if self.use_rht:
+            padded = np.zeros(self._pdim, dtype=np.float32)
+            padded[: self.dim] = q_unit
+            rot = rht(padded[None, :], self.seed)[0]
+            rot /= np.linalg.norm(rot) + 1e-12
+            return cast("NDArray[np.float32]", rot)
+        if self.use_opq and self._opq_rotation is not None:
+            return cast(
+                "NDArray[np.float32]",
+                (q_unit @ self._opq_rotation).astype(np.float32),
+            )
+        return q_unit.astype(np.float32)
 
     def _require_fitted(self) -> None:
         if not self._fitted:
@@ -288,6 +318,13 @@ class IVFPQSnapIndex(FreezableIndex):
                 UserWarning,
                 stacklevel=2,
             )
+        if self.use_opq:
+            # Fit rotation on unit-normalised inputs.  _preprocess
+            # returns unit vectors and skips the rotation step because
+            # _opq_rotation is still None at this point, so we can
+            # reuse it instead of duplicating the norm code here.
+            X_unit, _ = self._preprocess(arr)
+            self._opq_rotation = fit_opq_rotation(X_unit, self.M)
         pre, _ = self._preprocess(arr)
         # 1. Coarse k-means.
         self._coarse = kmeans_mse(
@@ -923,6 +960,11 @@ class IVFPQSnapIndex(FreezableIndex):
             q_pre_all = rht(padded, self.seed)
             # Optimized: ~4x faster than np.linalg.norm(..., axis=1) via einsum
             q_pre_all /= np.sqrt(np.einsum('ij,ij->i', q_pre_all, q_pre_all))[:, np.newaxis] + 1e-12
+        elif self.use_opq and self._opq_rotation is not None:
+            # Apply the learned rotation to every query in the batch
+            # so search_batch stays consistent with search() -- the
+            # single-query path rotates via _preprocess_single.
+            q_pre_all = (Q_unit @ self._opq_rotation).astype(np.float32)
         else:
             q_pre_all = Q_unit.astype(np.float32)
 
@@ -1055,6 +1097,8 @@ class IVFPQSnapIndex(FreezableIndex):
             flags |= _FLAG_USE_RHT
         if self.keep_full_precision:
             flags |= _FLAG_KEEP_FULL_PRECISION
+        if self.use_opq:
+            flags |= _FLAG_USE_OPQ
         n = len(self._ids_by_row)
 
         def _write(f: "ChecksumWriter") -> None:
@@ -1068,6 +1112,14 @@ class IVFPQSnapIndex(FreezableIndex):
             )
             f.write(self._coarse.tobytes())
             f.write(self._codebooks.tobytes())
+            if self.use_opq:
+                # (pdim, pdim) float32 rotation, placed after the
+                # codebooks and before offsets.  v5 readers gate the
+                # block on _FLAG_USE_OPQ; v4 and older readers refuse
+                # v5 files at the version check above, so they never
+                # reach this position.
+                assert self._opq_rotation is not None
+                f.write(self._opq_rotation.tobytes())
             f.write(self._offsets.tobytes())
             if n > 0:
                 # _codes is shape (M, n); ascontiguousarray ensures the
@@ -1113,10 +1165,12 @@ class IVFPQSnapIndex(FreezableIndex):
             normalized = bool(flags & _FLAG_NORMALIZED)
             use_rht = bool(flags & _FLAG_USE_RHT)
             keep_full_precision = bool(flags & _FLAG_KEEP_FULL_PRECISION)
+            use_opq = bool(flags & _FLAG_USE_OPQ)
             idx = cls(
                 dim=dim, nlist=nlist, M=M, K=K, seed=seed,
                 normalized=normalized, use_rht=use_rht,
                 keep_full_precision=keep_full_precision,
+                use_opq=use_opq,
             )
             if pdim != idx._pdim or d_sub != idx._d_sub:
                 raise ValueError(
@@ -1132,6 +1186,11 @@ class IVFPQSnapIndex(FreezableIndex):
                 np.frombuffer(f.read(M * K * d_sub * 4), dtype=np.float32)
                 .reshape(M, K, d_sub).copy()
             )
+            if use_opq:
+                idx._opq_rotation = (
+                    np.frombuffer(f.read(pdim * pdim * 4), dtype=np.float32)
+                    .reshape(pdim, pdim).copy()
+                )
             idx._offsets = (
                 np.frombuffer(f.read((nlist + 1) * 8), dtype=np.int64).copy()
             )

@@ -66,6 +66,32 @@ hits = idx.search(query, k=10, nprobe=32, rerank_candidates=100)
 See [benchmarks](../benchmarks.md) for the full sweep and reproduction
 instructions.
 
+## OPQ rotation
+
+`use_opq=True` turns on a learned orthogonal rotation during `fit()`
+that balances per-subspace variance, improving recall at the same
+bytes/vec.  Cost is one eigendecomposition of the `(dim, dim)`
+covariance (~50 ms and ~270 MB peak on N=57k training samples at
+dim=384).  Runtime cost per query is one extra `(1, dim) @ (dim, dim)`
+matmul (~2 us), invisible against the rest of the search pipeline.
+
+```python
+idx = IVFPQSnapIndex(
+    dim=384, nlist=512, M=48, K=256,
+    normalized=True, use_opq=True, seed=0,
+)
+idx.fit(train_sample)
+idx.add_batch(ids, corpus)
+```
+
+OPQ pays off when subspace dim (`dim / M`) is at least 4.  At
+`M = dim / 2` the subspaces have no room to redistribute variance
+and the recall gain collapses.  See the [benchmarks](../benchmarks.md)
+page for the measured recall-vs-M table on BEIR FIQA.
+
+`use_opq` is mutually exclusive with `use_rht`: both are rotations,
+OPQ learned from the data, RHT a fixed random one.  Pick one.
+
 ## File format
 
 On-disk extension: `.snpi`. Magic `SNPI`, v4 as of v0.9.0 (adds
