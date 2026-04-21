@@ -129,6 +129,65 @@ Reproduce with `python experiments/bench_competitive.py` after
 caching both `experiments/.cache_fiqa_bge_small.npy` and
 `experiments/.cache_fiqa_queries_bge_small.npy`.
 
+## OPQ rotation: recall vs M (single dataset)
+
+**Scope.** These numbers come from **one dataset, BEIR FIQA with
+BGE-small**.  OPQ gains depend on the source distribution; on
+datasets with near-isotropic coordinate variance the rotation has
+nothing to redistribute.  Treat this as "OPQ's behaviour on modern
+sentence embeddings" rather than a universal claim.
+
+Setup identical to the competitive table: N = 57,638, dim = 384,
+nlist = 512, normalized=True, rerank disabled.  300 queries sampled
+from FIQA's test set.
+
+| `M` | `d_sub` | recall@10 (baseline) | recall@10 (OPQ) | delta | disk MB |
+|----:|--------:|---------------------:|----------------:|------:|--------:|
+|  48 |    8    |               0.553  |       **0.656** | +10.3 pp |   4.3  |
+|  96 |    4    |               0.767  |       **0.812** |  +4.6 pp |   6.5  |
+| 192 |    2    |               0.932  |             0.931 |   0.0 pp  |  12.6  |
+
+OPQ helps when subspaces have room to redistribute variance
+(`d_sub >= 4`).  At `d_sub = 2` the rotation has almost no freedom --
+it can only pair up two dimensions at a time -- so the recall
+delta collapses.  Latency is identical in all three rows (the
+extra matmul at preprocess is ~10 us and hides in the noise floor).
+
+The M=48 row is the interesting one.  Baseline snapvec at that
+budget is the matched-budget underdog in the head-to-head against
+FAISS IVFPQ (0.553 vs FAISS's 0.603 at M=48, see competitive
+table above).  With OPQ the same snapvec config hits 0.656 on the
+same corpus -- pulling the snapvec curve above FAISS at the
+aggressive-compression corner, on this dataset.  How much of that
+carries to other BEIR tasks or to non-BGE embeddings is not measured
+in this repo; run the bench with your own corpus to check before
+shipping it as a claim.
+
+### Training cost
+
+OPQ adds one eigendecomposition of the `(dim, dim)` covariance to
+`fit()`.  Measured on the FIQA training sample:
+
+| N (training rows) | dim | `fit_opq_rotation` time | peak memory |
+|-------------------|-----|-------------------------|-------------|
+| 10,000            | 384 | 21 ms                    | 52 MB       |
+| 57,638            | 384 | 56 ms                    | 271 MB      |
+
+The memory peak comes from the intermediate `float64` cast used
+during covariance accumulation (needed for numerical stability at
+large N).  At N = 1M this scales to about 3 GB transiently; split
+the training set or upstream a `float64` cast of a sample if that
+is a concern.  The stored rotation matrix itself is
+`dim * dim * 4` bytes (576 KB at dim=384).
+
+Runtime cost is negligible: the query rotation is a
+`(1, dim) @ (dim, dim)` matmul at ~1.6 us, and a batched
+`(200, dim) @ (dim, dim)` is ~42 us -- both hidden by the rest of
+the search pipeline.
+
+Reproduce with `python experiments/bench_ivfpq_opq.py` after
+caching the FIQA corpus.
+
 ## Historical: snapvec vs sqlite-vec across N
 
 The earlier (pre-competitive-table) snapvec-vs-sqlite-vec scale

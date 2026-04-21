@@ -44,6 +44,23 @@ hurts more than it helps: the k-means fit is already capturing
 subspace-local structure. Pass `use_rht=True` only if your embeddings are
 very non-gaussian and you see recall drop on held-out queries.
 
+## OPQ rotation
+
+`use_opq=True` turns on a learned orthogonal rotation during `fit()`
+that balances per-subspace variance, typically lifting recall@10
+by several percentage points at the same bytes/vec.  See the
+[benchmarks](../benchmarks.md) page for the measured recall-vs-M
+table on BEIR FIQA.
+
+```python
+idx = PQSnapIndex(dim=384, M=48, K=256, use_opq=True)
+idx.fit(train_sample)
+```
+
+Cost: one extra eigendecomposition at fit time (milliseconds on
+typical training sets), one extra `(dim, dim)` matmul per query
+(microseconds).  Mutually exclusive with `use_rht`.
+
 ## File format
 
 On-disk extension: `.snpq`. Magic `SNPQ`, v1 as of v0.9.0.
