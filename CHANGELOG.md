@@ -6,6 +6,24 @@ the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.10.2] -- 2026-04-21
+
+Release-infrastructure patch on top of v0.10.1.  No library changes.
+
+### Changed
+
+- **Drop `macos-13` from the wheel matrix.**  During the v0.10.1
+  release run the GitHub-hosted `macos-13` runner pool stayed queued
+  for ~45 minutes and was cancelled, blocking the PyPI publish
+  (`publish` requires every wheel job to succeed).  Apple Silicon has
+  dominated new Mac sales for 4+ years; Intel Mac users now install
+  from the sdist (requires `brew install libomp` and a C compiler
+  available via Xcode command-line tools).  Re-adding the row is one
+  matrix entry if GitHub's macos-13 capacity recovers.
+
+The v0.10.0 and v0.10.1 tags exist in git but never produced PyPI
+artifacts; 0.10.2 is the first version actually published.
+
 ## [0.10.1] -- 2026-04-20
 
 Release-infrastructure patch on top of v0.10.0.  No library changes.
