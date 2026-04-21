@@ -19,7 +19,7 @@ from ._pq import PQSnapIndex
 from ._residual import ResidualSnapIndex
 from ._rotation import padded_dim, rht
 
-__version__ = "0.10.2"
+__version__ = "0.10.3"
 __all__ = [
     "SnapIndex",
     "PQSnapIndex",
