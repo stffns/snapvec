@@ -60,8 +60,10 @@ claiming a recall win downstream.
 
 The memory peak comes from the intermediate float64 cast used for
 covariance accumulation; it scales to ~3 GB transiently at N = 1M.
-Stored rotation matrix itself is `dim * dim * 4` bytes (576 KB at
-dim=384).  Runtime cost is ~1.6 us per query matmul.
+A follow-up can chunk the covariance accumulation to bound memory
+at the cost of one extra pass; not in this release.  Stored
+rotation matrix itself is `dim * dim * 4` bytes (576 KB at dim=384).
+Runtime cost is ~1.6 us per query matmul.
 
 ### File format
 
@@ -70,9 +72,12 @@ dim=384).  Runtime cost is ~1.6 us per query matmul.
 - `.snpi` bumped to v5 (legacy v1-v4 still readable).  New flag
   `_FLAG_USE_OPQ` (bit 3); rotation block written only when set.
 
-Files saved without `use_opq=True` are byte-identical to v0.10.3
-(no zero-padding, no spurious rotation block), so baseline
-deployments pay no disk cost for the new capability.
+Non-OPQ saves pay no disk cost for the new rotation block -- the
+serialisation is gated on the flag, so baseline indices get only
+the four-byte version-header bump from v1 to v2 (`.snpq`) or v4
+to v5 (`.snpi`).  v0.10.x readers still refuse v0.11.0 files at
+the version check, even when no OPQ flag is set; upgrade them via
+`pip install -U snapvec` as the error message suggests.
 
 ### Tests
 
