@@ -25,13 +25,36 @@ operating points **and** at matched-budget points where we have a
 comparable PQ config.  Goal is to let the reader see the full Pareto
 shape rather than cherry-picked wins.
 
-**Config.** BEIR FIQA corpus (N = 57,638, dim = 384, BGE-small,
-unit-normalised).  200 queries sampled from FIQA's 648 test queries.
-Apple M4 Pro, 12 cores, 24 GB RAM, NumPy 2.4.3, Python 3.12.  Every
-backend pinned to a single thread for apples-to-apples per-query
-latency.  GC disabled inside the timing loop.  **Ground truth** is
-float32 brute-force top-10 dot product on the same unit-normalised
-corpus -- recall@10 is against exact NN.
+![Pareto frontier](_static/pareto.png)
+
+Point area is proportional to the on-disk footprint of the index
+file (the third axis of the tradeoff).  Rows sitting up-and-left
+are the frontier; anything further down-and-right is dominated.
+
+!!! info "Scope and methodology"
+    **Dataset.** BEIR FIQA, one of the BEIR retrieval benchmarks.
+    Embeddings are BGE-small (dim = 384), corpus N = 57,638,
+    unit-normalised.  200 queries sampled from the 648 test
+    queries.  Ground truth is float32 brute-force top-10 dot
+    product on the same unit-normalised corpus (recall@10 is
+    against exact NN).
+
+    **Hardware.** Apple M4 Pro, 12 cores, 24 GB RAM, macOS 14.
+    Every backend pinned to a single thread
+    (`faiss.omp_set_num_threads(1)` at module level, and
+    `idx.set_num_threads(1)` on the hnswlib instance; snapvec default
+    is already serial) for apples-to-apples per-query latency.
+    GC disabled inside the timing loop.  p50 and p99 reported
+    across the query set (median, not mean, to shrug off outliers).
+
+    **Versions.** snapvec 0.11.0, faiss-cpu 1.13.2, hnswlib 0.8.0,
+    sqlite-vec 0.1.7, NumPy 2.4.3, Python 3.12.
+
+    **What this table isn't.** Evidence that snapvec beats FAISS on
+    *your* dataset.  Modern embeddings vary in coordinate-variance
+    shape, and OPQ gains in particular are distribution-dependent.
+    Run `python experiments/bench_competitive.py` on your own
+    corpus before citing these numbers in a design review.
 
 Every row below is approximate (recall < 1.0) **except sqlite-vec**,
 which is an exact brute-force scan.  snapvec has no exact mode --
