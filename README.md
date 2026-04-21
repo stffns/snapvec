@@ -19,9 +19,26 @@ point on the accuracy / storage / latency frontier:
 | `PQSnapIndex` | one-off `fit` | 24-96x | 0.95 | Modern LLM embeddings, aggressive compression |
 | `IVFPQSnapIndex` | one-off `fit` | 24-96x | 0.98 | Sub-linear search at scale (N > 100k) |
 
-Headline number: **recall@10 = 0.977 at 441 us/query** on BEIR FIQA
-(N = 57,638, BGE-small), 25-125x faster than sqlite-vec at comparable
-recall.
+![Pareto frontier](docs/_static/pareto.png)
+
+Three numbers from v0.11.0 on BEIR FIQA (N = 57,638, dim = 384
+BGE-small, Apple M4 Pro, single-thread, 200 queries, point area
+proportional to on-disk footprint):
+
+- **0.945 recall @ 345 us**: IVFPQ + fp16 rerank.  Pareto-dominant
+  under 500 us on this corpus.
+- **0.895 recall @ 319 us**: IVFPQ at matched FAISS M=192 budget
+  (12.6 MB).  1.4x faster than FAISS at essentially the same recall.
+- **0.649 recall @ 263 us** at 4.9 MB: IVFPQ + OPQ at the aggressive
+  M=48 corner.  Beats FAISS IVFPQ M=48 on recall (+4.6 pp) at
+  comparable disk; FAISS wins the same corner on latency (144 us).
+
+Scope: one dataset, one hardware class.  Run
+`python experiments/bench_competitive.py` on your own corpus before
+citing these as general claims.  See
+[benchmarks](https://stffns.github.io/snapvec/benchmarks/) for the
+full matched-budget table, OPQ recall-vs-M sweep, threading curve,
+and N-scaling comparison vs sqlite-vec.
 
 ## Install
 
