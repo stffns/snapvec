@@ -43,16 +43,18 @@ story, use sqlite-vec or FAISS `IndexFlatIP`.
 
 | Backend | recall@10 | p50 us | p99 us | disk MB | build s |
 |---------|----------:|-------:|-------:|--------:|--------:|
-| sqlite-vec (brute-force cosine, exact) | **1.000** | 13891 | 18628 | 91.1 | 0.5 |
-| hnswlib (M=32, ef_search=128) | 0.994 | 561 | 994 | 104.5 | 45 |
-| **snapvec IVFPQ + fp16 rerank (M=192)** | **0.945** | **359** | 457 | 56.9 | 108 |
-| FAISS IVFPQ (M=192) [matched-budget] | 0.906 | 483 | 584 | 12.7 | 17 |
-| **snapvec IVFPQ no rerank (M=192)** | 0.895 | **325** | 376 | 12.6 | 110 |
-| snapvec SnapIndex 4-bit scalar (full-scan) | 0.854 | 2676 | 3164 | 15.4 | 1.1 |
-| snapvec SnapIndex 3-bit scalar (full-scan) | 0.736 | 2688 | 3013 | 11.7 | 0.8 |
-| snapvec SnapIndex 2-bit scalar (full-scan) | 0.618 | 2726 | 4016 | 8.0 | 0.7 |
-| FAISS IVFPQ (M=48) | 0.603 | 142 | 200 | 4.4 | 10 |
-| snapvec IVFPQ no rerank (M=48) [matched-budget] | 0.549 | 267 | 350 | 4.3 | 33 |
+| sqlite-vec (brute-force cosine, exact) | **1.000** | 13401 | 40936 | 91.1 | 0.6 |
+| hnswlib (M=32, ef_search=128) | 0.994 | 524 | 824 | 104.5 | 44 |
+| **snapvec IVFPQ + fp16 rerank (M=192)** | **0.945** | **345** | 510 | 56.9 | 111 |
+| FAISS IVFPQ (M=192) [matched-budget] | 0.906 | 457 | 550 | 12.7 | 17 |
+| **snapvec IVFPQ no rerank (M=192)** | 0.895 | **319** | 502 | 12.6 | 110 |
+| snapvec IVFPQ no rerank (M=192) + OPQ | 0.895 | 368 | 557 | 13.2 | 112 |
+| snapvec SnapIndex 4-bit scalar (full-scan) | 0.854 | 2764 | 3099 | 15.4 | 1.1 |
+| snapvec SnapIndex 3-bit scalar (full-scan) | 0.736 | 2742 | 3815 | 11.7 | 0.8 |
+| **snapvec IVFPQ no rerank (M=48) + OPQ** | **0.649** | 263 | 331 | 4.9 | 33 |
+| snapvec SnapIndex 2-bit scalar (full-scan) | 0.618 | 2740 | 5594 | 8.0 | 0.7 |
+| FAISS IVFPQ (M=48) | 0.603 | 144 | 217 | 4.4 | 10 |
+| snapvec IVFPQ no rerank (M=48) [matched-budget] | 0.549 | 241 | 319 | 4.3 | 34 |
 
 Rows ordered by recall@10 descending.
 
@@ -78,21 +80,25 @@ hits ~10-15% routinely.
 
 The Pareto frontier (no backend strictly dominated) is:
 
-1. **FAISS IVFPQ M=48** owns the aggressive-compression corner --
-   0.603 recall at 4.4 MB and 142 us.  snapvec at the same M budget
-   is slower AND has lower recall, so at that ultra-compressed point
-   FAISS wins outright.
+1. **Aggressive-compression corner (~4.5 MB) is a recall-vs-latency
+   trade**: FAISS IVFPQ M=48 takes the fastest-at-this-disk point
+   (0.603 recall at 144 us), snapvec IVFPQ M=48 + OPQ takes the
+   highest-recall point (0.649 recall at 263 us).  Baseline snapvec
+   at M=48 without OPQ is dominated (lower recall than FAISS at
+   higher latency) -- reach for `use_opq=True` at this budget.
 2. **snapvec IVFPQ M=192** matches FAISS M=192 on disk (12.6 vs
-   12.7 MB) and on recall (0.895 vs 0.906) while being **1.5x faster**
-   at p50 (325 vs 483 us).  This is the matched-budget headline.
+   12.7 MB) and on recall (0.895 vs 0.906) while being **1.4x faster**
+   at p50 (319 vs 457 us).  This is the matched-budget headline.
+   OPQ at M=192 is **not worth it** (same recall, +16% latency,
+   +576 KB disk): the 2-dim subspaces have no room for the rotation.
 3. **snapvec IVFPQ + fp16 rerank** is the Pareto-dominant high-recall
-   point under 500 us: 0.945 recall at 359 us -- faster than FAISS
+   point under 500 us: 0.945 recall at 345 us -- faster than FAISS
    M=192 AND higher recall, at the cost of a 4.5x larger index file
    (holds a float16 copy for the rerank pass).
 4. **hnswlib** reaches the highest non-exact recall (0.994) but pays
-   with disk (104 MB) and p99 latency (994 us).
+   with disk (104 MB) and p99 latency (824 us).
 5. **sqlite-vec** is exact (recall 1.000) but its brute-force
-   cosine scan is 13.9 ms -- ~40x slower than any of the ANN backends
+   cosine scan is 13.4 ms -- ~40x slower than any of the ANN backends
    on this N.  It's the 'zero ANN tuning, accept the latency' baseline.
 
 ### Positioning in plain language
@@ -105,8 +111,10 @@ The Pareto frontier (no backend strictly dominated) is:
   centroid-expansion matmul dominates); the recall/disk tradeoff is
   the only knob you turn.
 - If you have **space for PQ training and want aggressive disk
-  compression (~4 MB)**: FAISS IVFPQ M=48 is the winner at that
-  point on this hardware.
+  compression (~4-5 MB)**: two viable picks.  FAISS IVFPQ M=48 is
+  the fastest (144 us p50, 0.603 recall).  snapvec IVFPQ M=48 +
+  `use_opq=True` is the highest recall (0.649) at 1.8x the latency
+  (263 us).  Both at ~identical disk.
 - If you want **matched disk and the fastest ANN latency for
   recall ~0.9**: snapvec IVFPQ M=192.
 - If you want **recall approaching 0.95 in sub-millisecond latency**:
@@ -118,9 +126,11 @@ The Pareto frontier (no backend strictly dominated) is:
 
 - FAISS `fit` is ~6.5x faster than snapvec's `fit` at the same config
   (17 s vs 110 s at M=192).  Build time is a real competitive gap.
-- FAISS IVFPQ at M=48 beats snapvec at M=48; snapvec's PQ training
-  isn't uniformly better at every compression point.  The advantage
-  shows up at mid-range (M=96-192).
+- At M=48 without OPQ, FAISS's PQ training beats snapvec's.
+  Turning on `use_opq=True` flips that: snapvec + OPQ hits 0.649
+  recall at M=48 versus FAISS's 0.603, at comparable disk (4.9 vs
+  4.4 MB).  Baseline (non-OPQ) snapvec is dominated on this corner
+  so reach for `use_opq=True` at aggressive compression.
 - These are serial per-query numbers.  hnswlib in particular gets a
   large speedup from its default thread pool; the [threading curve]
   section covers how snapvec scales batched search.
