@@ -1,3 +1,6 @@
 ## 2024-05-18 - Fast row-wise Euclidean norm in pure NumPy
 **Learning:** In performance-critical paths, computing the batch norm of a 2D array via `np.linalg.norm(arr, axis=1)` is relatively slow. Using `np.sqrt(np.einsum('ij,ij->i', arr, arr))` is significantly faster (~4x speedup on a laptop CPU for typical batch sizes). If `keepdims=True` behavior is needed, appending `[:, np.newaxis]` matches the original shape seamlessly.
 **Action:** Always prefer `np.sqrt(np.einsum('ij,ij->i', arr, arr))` over `np.linalg.norm(arr, axis=1)` when computing row-wise vector norms in NumPy to eliminate dispatch overhead and improve execution speed.
+## 2024-05-18 - Avoid redundant `.astype(np.float32)` calls in NumPy
+**Learning:** Explicitly calling `.astype(np.float32)` on NumPy arrays that are already of type `float32` causes unnecessary memory copies, which degrades performance in hot loops. Similarly, scaling operations like `float32_array * scalar_float64` create intermediate `float64` arrays.
+**Action:** When working in performance-critical code, remove redundant `.astype()` calls and ensure scalars are correctly typed (e.g., using `np.float32()`) before array operations to prevent implicit type promotion and unnecessary memory allocations. Use `typing.cast` to satisfy mypy where needed without introducing runtime overhead.
