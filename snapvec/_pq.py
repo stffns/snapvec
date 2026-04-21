@@ -38,16 +38,18 @@ except ImportError:
     from ._fast_fallback import adc_colmajor
 from ._file_format import ChecksumWriter, save_with_checksum_atomic, verify_checksum
 from ._freezable import FreezableIndex
-from ._kmeans import kmeans_mse
+from ._kmeans import fit_opq_rotation, kmeans_mse
 from ._rotation import padded_dim, rht
 
 _MAGIC = b"SNPQ"
-_VERSION = 1
+_VERSION = 2  # v2: adds optional OPQ rotation block (present iff _FLAG_USE_OPQ)
+_LEGACY_VERSIONS: tuple[int, ...] = (1,)
 _MAX_ID_BYTES = 0xFFFF  # file format stores id length as uint16
 
 # Flags bitfield
 _FLAG_NORMALIZED = 1 << 0
 _FLAG_USE_RHT = 1 << 1
+_FLAG_USE_OPQ = 1 << 2
 
 
 def _divisors(n: int, lo: int = 2, hi: int = 1024) -> list[int]:
@@ -86,6 +88,12 @@ class PQSnapIndex(FreezableIndex):
         When True, prepend the randomized Hadamard transform before
         splitting into subspaces.  Off by default — on modern
         embeddings it hurts PQ by destroying subspace structure.
+    use_opq : bool, default False
+        When True, learn an orthogonal OPQ-P rotation (Ge et al.,
+        2013) during ``fit()`` and apply it to both corpus and
+        queries.  Balances per-subspace variance, typically lifting
+        recall@10 by 0.5-2 pp at the same bytes/vec.  Mutually
+        exclusive with ``use_rht``.
     """
 
     def __init__(
@@ -96,11 +104,18 @@ class PQSnapIndex(FreezableIndex):
         seed: int = 0,
         normalized: bool = False,
         use_rht: bool = False,
+        use_opq: bool = False,
     ) -> None:
         if not (2 <= K <= 256):
             raise ValueError(f"K must be in [2, 256]; got {K}")
         if M < 1:
             raise ValueError(f"M must be >= 1; got {M}")
+        if use_opq and use_rht:
+            raise ValueError(
+                "use_opq and use_rht are mutually exclusive: OPQ learns "
+                "a data-specific rotation during fit(), RHT applies a "
+                "fixed random one.  Pick one."
+            )
 
         pdim = padded_dim(dim) if use_rht else dim
         if pdim % M != 0:
@@ -117,6 +132,7 @@ class PQSnapIndex(FreezableIndex):
         self.seed = seed
         self.normalized = normalized
         self.use_rht = use_rht
+        self.use_opq = use_opq
 
         self._pdim = pdim
         self._d_sub = pdim // M
@@ -125,6 +141,8 @@ class PQSnapIndex(FreezableIndex):
         self._codebooks: NDArray[np.float32] = np.zeros(
             (M, K, self._d_sub), dtype=np.float32
         )
+        # (pdim, pdim) OPQ rotation, set in fit() when use_opq=True.
+        self._opq_rotation: NDArray[np.float32] | None = None
         self._ids: list[Any] = []
         self._id_to_pos: dict[Any, int] = {}
         self._codes: NDArray[np.uint8] = np.zeros((M, 0), dtype=np.uint8)
@@ -171,6 +189,9 @@ class PQSnapIndex(FreezableIndex):
             # Optimized: ~4x faster than np.linalg.norm(..., axis=1) via einsum
             rot /= np.sqrt(np.einsum('ij,ij->i', rot, rot))[:, np.newaxis] + 1e-12
             return rot.astype(np.float32), norms
+        if self.use_opq and self._opq_rotation is not None:
+            # Rotation is orthogonal, so unit-norm inputs stay unit-norm.
+            return (units @ self._opq_rotation).astype(np.float32), norms
         return units.astype(np.float32), norms
 
     def _preprocess_single(
@@ -182,13 +203,18 @@ class PQSnapIndex(FreezableIndex):
         if q_norm < 1e-10:
             return np.zeros(self._pdim, dtype=np.float32)
         q_unit = q / q_norm
-        if not self.use_rht:
-            return q_unit.astype(np.float32)
-        padded = np.zeros(self._pdim, dtype=np.float32)
-        padded[: self.dim] = q_unit
-        rot = rht(padded[None, :], self.seed)[0]
-        rot /= np.linalg.norm(rot) + 1e-12
-        return cast("NDArray[np.float32]", rot)
+        if self.use_rht:
+            padded = np.zeros(self._pdim, dtype=np.float32)
+            padded[: self.dim] = q_unit
+            rot = rht(padded[None, :], self.seed)[0]
+            rot /= np.linalg.norm(rot) + 1e-12
+            return cast("NDArray[np.float32]", rot)
+        if self.use_opq and self._opq_rotation is not None:
+            return cast(
+                "NDArray[np.float32]",
+                (q_unit @ self._opq_rotation).astype(np.float32),
+            )
+        return q_unit.astype(np.float32)
 
     # ──────────────────────────────────────────────────────────────── #
     # training                                                          #
@@ -221,6 +247,19 @@ class PQSnapIndex(FreezableIndex):
             raise ValueError(
                 f"need at least K={self.K} training vectors; got {len(arr)}"
             )
+        if self.use_opq:
+            # Fit the rotation on unit-normalised inputs BEFORE training
+            # the codebooks so the kmeans sees the rotated space.  We
+            # normalise here explicitly (not via _preprocess) because
+            # _preprocess would try to apply the rotation that doesn't
+            # exist yet.
+            if self.normalized:
+                X_unit = arr
+            else:
+                raw = np.sqrt(np.einsum("ij,ij->i", arr, arr))
+                safe = np.where(raw > 1e-10, raw, np.float32(1.0)).astype(np.float32)
+                X_unit = (arr / safe[:, None]).astype(np.float32)
+            self._opq_rotation = fit_opq_rotation(X_unit, self.M)
         pre, _ = self._preprocess(arr)
         for j in range(self.M):
             Xj = pre[:, j * self._d_sub : (j + 1) * self._d_sub]
@@ -378,6 +417,8 @@ class PQSnapIndex(FreezableIndex):
             flags |= _FLAG_NORMALIZED
         if self.use_rht:
             flags |= _FLAG_USE_RHT
+        if self.use_opq:
+            flags |= _FLAG_USE_OPQ
         n = len(self._ids)
 
         def _write(f: "ChecksumWriter") -> None:
@@ -390,6 +431,11 @@ class PQSnapIndex(FreezableIndex):
                 )
             )
             f.write(self._codebooks.tobytes())
+            if self.use_opq:
+                # (pdim, pdim) float32 rotation, serialised after the
+                # codebooks.  Only present when _FLAG_USE_OPQ is set.
+                assert self._opq_rotation is not None
+                f.write(self._opq_rotation.tobytes())
             if n > 0:
                 f.write(np.ascontiguousarray(self._codes.T).tobytes())
                 if not self.normalized:
@@ -418,18 +464,20 @@ class PQSnapIndex(FreezableIndex):
             version, dim, M, K, d_sub, seed, n, flags, pdim = struct.unpack(
                 "<IIIIIIIII", f.read(36)
             )
-            if version != _VERSION:
+            if version != _VERSION and version not in _LEGACY_VERSIONS:
+                supported = sorted({_VERSION, *_LEGACY_VERSIONS})
                 raise ValueError(
                     f"unsupported .snpq version {version}; this build of "
-                    f"snapvec writes and reads version {_VERSION}.  If "
+                    f"snapvec supports versions {supported}.  If "
                     f"{version} > {_VERSION} this file was written by a "
                     f"newer snapvec -- upgrade via `pip install -U snapvec`."
                 )
             normalized = bool(flags & _FLAG_NORMALIZED)
             use_rht = bool(flags & _FLAG_USE_RHT)
+            use_opq = bool(flags & _FLAG_USE_OPQ)
             idx = cls(
                 dim=dim, M=M, K=K, seed=seed,
-                normalized=normalized, use_rht=use_rht,
+                normalized=normalized, use_rht=use_rht, use_opq=use_opq,
             )
             if pdim != idx._pdim or d_sub != idx._d_sub:
                 raise ValueError(
@@ -443,6 +491,12 @@ class PQSnapIndex(FreezableIndex):
                 .reshape(M, K, d_sub)
                 .copy()
             )
+            if use_opq:
+                idx._opq_rotation = (
+                    np.frombuffer(f.read(pdim * pdim * 4), dtype=np.float32)
+                    .reshape(pdim, pdim)
+                    .copy()
+                )
             idx._fitted = True
             if n > 0:
                 idx._codes = (

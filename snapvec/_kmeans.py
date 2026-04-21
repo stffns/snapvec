@@ -118,9 +118,80 @@ def probe_scores_l2_monotone(
     )
 
 
+def fit_opq_rotation(
+    X: NDArray[np.float32], M: int,
+) -> NDArray[np.float32]:
+    """Parametric OPQ rotation (Ge et al., 2013) via eigendecomposition.
+
+    Computes an orthogonal ``(d, d)`` matrix R such that ``X @ R``
+    has PQ subspaces of balanced variance, which PQ then quantizes
+    much more effectively than raw coordinates on real embeddings
+    (coordinate variance is typically highly skewed).
+
+    Parametric variant: assumes a centered Gaussian source; the
+    rotation is the sorted eigenvector matrix of the covariance with
+    a round-robin subspace allocation.  Fast (one eigendecomp on the
+    ``(d, d)`` covariance, no iterative optimisation).  Typically
+    captures most of the OPQ gain (non-parametric adds +0.3-0.8 pp
+    more at the cost of an iterative fit loop).
+
+    Algorithm:
+    1. Center X (subtract mean).
+    2. Covariance ``C = X_c^T @ X_c / n``.
+    3. Eigendecompose ``C = U diag(eigvals) U^T`` with ascending
+       eigvals (numpy's ``eigh`` default).
+    4. Sort eigenvectors by eigvalue descending.
+    5. Round-robin allocate sorted eigenvectors to M subspaces of
+       size ``d // M``.  Eigenvector ``i`` (0-indexed) goes to
+       subspace ``i % M``.  Spreads high-variance directions across
+       subspaces so no single subspace has all the energy.
+    6. Return R = stacked columns of sorted+permuted eigenvectors.
+
+    Orthogonality of R is preserved by the permutation (a permutation
+    of orthonormal vectors is still orthonormal), so ``<q, x> =
+    <R q, R x>`` exactly -- rotating both the query and the corpus
+    does not change inner products, only the coordinate basis used
+    for PQ.
+
+    Requires ``X.shape[1] % M == 0``; mirrors the PQ constraint on
+    the subspace dimension.
+    """
+    d = X.shape[1]
+    if d % M != 0:
+        raise ValueError(
+            f"OPQ requires dim ({d}) divisible by M ({M}); got remainder "
+            f"{d % M}."
+        )
+    mean = X.mean(0, keepdims=True)
+    X_c = X - mean
+    # (d, d) covariance.  For d up to a few thousand this is cheap.
+    cov = (X_c.T @ X_c).astype(np.float32) / max(len(X), 1)
+    eigvals, eigvecs = np.linalg.eigh(cov)  # ascending eigvals
+    # Sort descending so eigenvector[:, 0] has the largest variance.
+    order = np.argsort(-eigvals)
+    eigvecs_sorted = eigvecs[:, order]
+    # Round-robin to M subspaces of size d_sub.  For subspace j, its
+    # d_sub dimensions get eigenvectors j, j+M, j+2M, ... .
+    d_sub = d // M
+    perm = np.empty(d, dtype=np.int64)
+    for j in range(M):
+        for k in range(d_sub):
+            perm[j * d_sub + k] = j + k * M
+    # ``np.ascontiguousarray`` normalises the stride layout so downstream
+    # ``x @ R`` produces bit-identical output whether R came from this
+    # path or from a ``np.frombuffer`` in load() -- otherwise the two
+    # produce results that differ by float32 epsilon from accumulation
+    # order and determinism tests flake.
+    R: NDArray[np.float32] = np.ascontiguousarray(
+        eigvecs_sorted[:, perm]
+    ).astype(np.float32)
+    return R
+
+
 __all__ = [
     "kmeans_pp_init",
     "kmeans_mse",
     "assign_l2",
     "probe_scores_l2_monotone",
+    "fit_opq_rotation",
 ]

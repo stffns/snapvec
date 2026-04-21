@@ -632,3 +632,77 @@ def test_stats_shape() -> None:
     assert s["cluster_size_min"] >= 0
     assert s["cluster_size_max"] > 0
     assert s["default_nprobe"] == 1
+
+
+# ──────────────────────────────────────────────────────────────────── #
+# OPQ rotation                                                           #
+# ──────────────────────────────────────────────────────────────────── #
+
+
+def test_ivfpq_opq_fit_stores_rotation() -> None:
+    corpus = _clustered(500, 32, n_clusters=8, seed=50)
+    idx = IVFPQSnapIndex(
+        dim=32, nlist=8, M=8, K=16, normalized=True, use_opq=True, seed=0,
+    )
+    assert idx._opq_rotation is None
+    idx.fit(corpus)
+    R = idx._opq_rotation
+    assert R is not None
+    assert R.shape == (32, 32)
+    # R is orthogonal.
+    np.testing.assert_allclose(R.T @ R, np.eye(32), atol=1e-4)
+
+
+def test_ivfpq_opq_and_rht_mutually_exclusive() -> None:
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        IVFPQSnapIndex(dim=32, nlist=4, M=8, K=16, use_opq=True, use_rht=True)
+
+
+def test_ivfpq_opq_round_trip(tmp_path: Path) -> None:
+    corpus = _clustered(500, 32, n_clusters=8, seed=51)
+    idx = IVFPQSnapIndex(
+        dim=32, nlist=8, M=8, K=16, normalized=True, use_opq=True, seed=0,
+    )
+    idx.fit(corpus)
+    idx.add_batch(list(range(500)), corpus)
+    path = tmp_path / "opq.snpi"
+    idx.save(path)
+    loaded = IVFPQSnapIndex.load(path)
+    assert loaded.use_opq is True
+    assert loaded._opq_rotation is not None
+    np.testing.assert_array_equal(loaded._opq_rotation, idx._opq_rotation)
+    q = corpus[0]
+    assert idx.search(q, k=5, nprobe=4) == loaded.search(q, k=5, nprobe=4)
+
+
+def test_ivfpq_opq_recall_not_worse_than_baseline() -> None:
+    """On clustered synthetic data with a challenging PQ budget
+    (M=4, K=16, d=32), OPQ should match or beat the unrotated
+    baseline.  Not a strict recall-delta test because OPQ gains are
+    data-dependent; only asserts no regression."""
+    corpus = _clustered(1500, 64, n_clusters=20, seed=60)
+    queries = _clustered(50, 64, n_clusters=20, seed=61)
+
+    def build_search(use_opq: bool) -> list[list[int]]:
+        idx = IVFPQSnapIndex(
+            dim=64, nlist=16, M=4, K=16,
+            normalized=True, use_opq=use_opq, seed=0,
+        )
+        idx.fit(corpus[:1000])
+        idx.add_batch(list(range(1500)), corpus)
+        return [
+            [h[0] for h in idx.search(q, k=10, nprobe=8)]
+            for q in queries
+        ]
+
+    truth = _brute_topk(queries, corpus, 10)
+    base = build_search(use_opq=False)
+    opq = build_search(use_opq=True)
+    base_recall = _recall(base, truth, 10)
+    opq_recall = _recall(opq, truth, 10)
+    # Allow a small tolerance for data-specific variance.  OPQ should
+    # not materially regress (within 3 percentage points).
+    assert opq_recall >= base_recall - 0.03, (
+        f"OPQ recall {opq_recall:.3f} regressed below baseline "
+        f"{base_recall:.3f} on clustered synthetic data"
+    )
