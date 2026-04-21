@@ -6,6 +6,90 @@ the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.11.0] -- 2026-04-21
+
+First minor bump on the 0.10 line.  Adds optional OPQ rotation
+(parametric, Ge et al. 2013) to `PQSnapIndex` and `IVFPQSnapIndex`.
+No behaviour change for existing callers -- the flag defaults off.
+
+### Added
+
+- **`use_opq` parameter** on `PQSnapIndex` and `IVFPQSnapIndex`.
+  When True, `fit()` learns an orthogonal rotation that balances
+  per-subspace variance, and both corpus and queries go through
+  that rotation before PQ encoding / scoring.  Orthogonality
+  preserves inner products (`<q, x> == <Rq, Rx>`), so the rest of
+  the pipeline is unchanged.
+- **`snapvec._kmeans.fit_opq_rotation(X, M)`**: standalone helper
+  that returns the `(dim, dim)` float32 rotation.  Eigendecomposition
+  on the covariance in float64 (for numerical stability at large
+  training sets), round-robin allocation of sorted eigenvectors to
+  subspaces, downcast to float32 at the return boundary.
+
+### Impact (BEIR FIQA, BGE-small, N=57,638, nlist=512, 300 queries)
+
+Recall@10 at matched bytes/vec, rerank disabled:
+
+|  M  | d_sub | baseline | OPQ   |  delta  |
+|:---:|:-----:|:--------:|:-----:|:-------:|
+|  48 |   8   |   0.553  | 0.656 | +10.3pp |
+|  96 |   4   |   0.767  | 0.812 |  +4.6pp |
+| 192 |   2   |   0.932  | 0.931 |    0    |
+
+OPQ helps when the per-subspace dimension is at least 4.  At
+`d_sub = 2` the rotation has no room to redistribute variance and
+the gain collapses.  Latency is identical in all three rows
+(the extra matmul at preprocess is ~10 us, hidden by the rest of
+the search pipeline).
+
+**Scope.** The table above is measured on a single dataset (BEIR
+FIQA with BGE-small).  OPQ gains depend on the coordinate-variance
+distribution of your embedding; on near-isotropic distributions
+there is nothing for the rotation to redistribute.  Run
+`experiments/bench_ivfpq_opq.py` on your own corpus before
+claiming a recall win downstream.
+
+### Training cost
+
+`fit_opq_rotation` on the FIQA training sample (dim=384):
+
+| N (training rows) | time   | peak memory |
+|------------------:|-------:|------------:|
+|             10k   |  21 ms |    52 MB    |
+|             57k   |  56 ms |   271 MB    |
+
+The memory peak comes from the intermediate float64 cast used for
+covariance accumulation; it scales to ~3 GB transiently at N = 1M.
+Stored rotation matrix itself is `dim * dim * 4` bytes (576 KB at
+dim=384).  Runtime cost is ~1.6 us per query matmul.
+
+### File format
+
+- `.snpq` bumped to v2 (legacy v1 still readable).  New flag
+  `_FLAG_USE_OPQ` (bit 2); rotation block written only when set.
+- `.snpi` bumped to v5 (legacy v1-v4 still readable).  New flag
+  `_FLAG_USE_OPQ` (bit 3); rotation block written only when set.
+
+Files saved without `use_opq=True` are byte-identical to v0.10.3
+(no zero-padding, no spurious rotation block), so baseline
+deployments pay no disk cost for the new capability.
+
+### Tests
+
+9 new tests covering OPQ across PQSnapIndex and IVFPQSnapIndex:
+rotation orthogonality, mutual exclusion with RHT, save/load
+round-trip, seed determinism, no recall regression on clustered
+synthetic data, and a regression guard (`test_ivfpq_opq_search_batch_matches_search`)
+that asserts `search_batch` and `search` agree under `use_opq=True`.
+
+Full suite: 199 tests, `mypy --strict` clean, `ruff` clean.
+
+### Internal
+
+- PR #64 review caught a real bug during dogfooding: `search_batch`
+  initially rotated queries via `_preprocess_single`'s logic but
+  not in its own batch path.  Fixed + regression test added.
+
 ## [0.10.3] -- 2026-04-21
 
 Performance patch release.  No API changes.  Byte-identical on-disk

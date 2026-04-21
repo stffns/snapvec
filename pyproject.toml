@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "snapvec"
-version = "0.10.3"
+version = "0.11.0"
 description = "Fast compressed ANN search via randomized Hadamard transform and optimal Gaussian scalar quantization. NumPy + Cython compiled kernels."
 readme = "README.md"
 license = { text = "MIT" }
