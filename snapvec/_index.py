@@ -537,13 +537,22 @@ class SnapIndex(FreezableIndex):
         Accepts explicit qjl/rnorms arrays to support filtered subsets.
         """
         assert self._S is not None
-        q_unit_rot: NDArray[np.float32] = q_scaled / np.sqrt(self._pdim)
+        # np.sqrt(int) and np.sqrt(float) return numpy float64 scalars
+        # that would upcast the float32 arrays they multiply; wrap each
+        # scalar so the whole chain stays float32 under pre-NEP-50 numpy.
+        q_unit_rot: NDArray[np.float32] = cast(
+            "NDArray[np.float32]",
+            q_scaled / np.float32(np.sqrt(self._pdim)),
+        )
         S_q: NDArray[np.float32] = self._S @ q_unit_rot
         qjl_dots: NDArray[np.float32] = np.dot(qjl, S_q)
-        correction: NDArray[np.float32] = (
-            np.sqrt(np.pi / 2.0) / self._pdim * rnorms * qjl_dots
+        correction: NDArray[np.float32] = cast(
+            "NDArray[np.float32]",
+            np.float32(np.sqrt(np.pi / 2.0) / self._pdim)
+            * rnorms
+            * qjl_dots,
         )
-        return scores + correction
+        return cast("NDArray[np.float32]", scores + correction)
 
     # ──────────────────────────────────────────────────────────────────── #
     # Persistence                                                           #
