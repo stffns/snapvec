@@ -6,11 +6,13 @@ the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.11.1] -- 2026-04-20
+## [0.11.1] -- 2026-04-22
 
-Memory-footprint patch.  No API or file-format change; two targeted
-fixes on the fit and load paths so large indices (N = 1M class) stop
-peaking at 2x-10x the final RAM size during those phases.
+Memory + dtype correctness patch.  No API or file-format change.
+Two memory-footprint fixes on the fit/load paths for large indices
+(N = 1M class), plus a sweep through the scale-and-rotate paths to
+eliminate silent float64 upcasts.  Also ships the first batch of
+ADRs and the engineering-note paper draft.
 
 ### Changed
 
@@ -37,6 +39,26 @@ peaking at 2x-10x the final RAM size during those phases.
   transpose into the per-chunk copy into the final (M, n)
   C-contiguous array.  Eliminates the full-size transpose copy
   that the previous `.T.copy()` path allocated.
+
+### Fixed
+
+- **Silent float64 upcasts in scale-and-rotate paths.**  Several
+  sites in `_index.py`, `_ivfpq.py`, `_pq.py`, `_residual.py`, and
+  `_rotation.py` were multiplying or rotating float32 arrays in
+  ways that quietly promoted to float64 (e.g. `arr * scalar` with a
+  Python float, missing `astype(float32, copy=False)` at rotation
+  boundaries, `_apply_qjl_arrays` accumulating in float64).  All
+  hot-path arithmetic is now explicitly float32; perf is within 2%
+  noise on these paths.  Adds `tests/test_dtype_invariants.py` (224
+  lines) to lock the invariant.
+
+### Docs
+
+- First batch of Architecture Decision Records under `docs/adr/`
+  (5 records: RHT off, early_stop parked, OPQ-P vs OPQ-NP,
+  cluster-contiguous codes, memory-budget discipline).
+- Engineering-note paper draft on compressed ANN for local-first
+  RAG at `paper/snapvec-0.11.md`.
 
 ### Notes
 
