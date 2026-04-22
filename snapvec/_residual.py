@@ -341,10 +341,17 @@ class ResidualSnapIndex(FreezableIndex):
                     f"for dim={dim}; file may be corrupted or from a future version"
                 )
             if n > 0:
-                idx._codes1 = np.frombuffer(f.read(n * pdim), dtype=np.uint8).reshape(n, pdim).copy()
-                idx._codes2 = np.frombuffer(f.read(n * pdim), dtype=np.uint8).reshape(n, pdim).copy()
+                # ``readinto`` into a pre-allocated buffer avoids the
+                # transient bytes object that ``f.read()`` plus the
+                # subsequent ``.copy()`` held live simultaneously --
+                # roughly halves peak load() memory on large indices.
+                idx._codes1 = np.empty((n, pdim), dtype=np.uint8)
+                f.readinto(idx._codes1.data)
+                idx._codes2 = np.empty((n, pdim), dtype=np.uint8)
+                f.readinto(idx._codes2.data)
                 if not normalized:
-                    idx._norms = np.frombuffer(f.read(n * 4), dtype=np.float32).copy()
+                    idx._norms = np.empty(n, dtype=np.float32)
+                    f.readinto(idx._norms.data)
                 idx._ids = []
                 for _ in range(n):
                     (ln,) = struct.unpack("<H", f.read(2))

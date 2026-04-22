@@ -157,18 +157,25 @@ def fit_opq_rotation(
     the subspace dimension.
     """
     d = X.shape[1]
+    n = len(X)
     if d % M != 0:
         raise ValueError(
             f"OPQ requires dim ({d}) divisible by M ({M}); got remainder "
             f"{d % M}."
         )
+    # Centre in float32 (cheap), then accumulate the covariance in
+    # float64 across small chunks of the centred data.  This keeps
+    # peak memory at ~(chunk * d * 8) bytes instead of (n * d * 8) --
+    # at n=1M, d=384 that is ~30 MB per chunk vs ~3 GB for the
+    # whole-batch cast used in earlier versions.
     mean = X.mean(0, keepdims=True)
-    X_c = X - mean
-    # (d, d) covariance.  Accumulate in float64 to avoid precision
-    # loss at large N (a few million rows), then downcast for the
-    # eigendecomposition which is also happier on float64.
-    X_c64 = X_c.astype(np.float64)
-    cov = (X_c64.T @ X_c64) / max(len(X), 1)
+    cov = np.zeros((d, d), dtype=np.float64)
+    chunk = 16_384
+    for start in range(0, n, chunk):
+        X_chunk = X[start : start + chunk] - mean
+        X_chunk64 = X_chunk.astype(np.float64)
+        cov += X_chunk64.T @ X_chunk64
+    cov /= max(n, 1)
     eigvals, eigvecs = np.linalg.eigh(cov)  # ascending eigvals
     # Sort descending so eigenvector[:, 0] has the largest variance.
     order = np.argsort(-eigvals)

@@ -617,31 +617,30 @@ class SnapIndex(FreezableIndex):
             legacy_3bit = (version < 3 and mse_bits == 3)
 
             (packed_len,) = struct.unpack("<I", f.read(4))
-            data = f.read(packed_len)
             if idx._can_pack and not legacy_3bit:
-                # Disk layout matches RAM layout — read directly, no unpack.
+                # Disk layout matches RAM layout -- read directly into a
+                # pre-allocated buffer.  Avoids the transient ``data =
+                # f.read(packed_len)`` bytes object holding a second copy
+                # of the payload alongside the final array.
                 packed_cols = (pdim * mse_bits) // 8
-                idx._indices = (
-                    np.frombuffer(data, dtype=np.uint8)
-                    .reshape(n, packed_cols)
-                    .copy()
-                )
+                idx._indices = np.empty((n, packed_cols), dtype=np.uint8)
+                f.readinto(idx._indices.data)
             else:
+                data = f.read(packed_len)
                 unpacked = _unpack(
                     data, n, pdim, mse_bits, legacy_3bit=legacy_3bit,
                 )
                 idx._indices = (
                     idx._pack_matrix(unpacked) if idx._can_pack else unpacked
                 )
-            idx._norms = np.frombuffer(f.read(n * 4), dtype=np.float32).copy()
+            idx._norms = np.empty(n, dtype=np.float32)
+            f.readinto(idx._norms.data)
 
             if use_prod and n > 0:
-                idx._qjl = (
-                    np.frombuffer(f.read(n * pdim), dtype=np.int8)
-                    .reshape(n, pdim)
-                    .copy()
-                )
-                idx._rnorms = np.frombuffer(f.read(n * 4), dtype=np.float32).copy()
+                idx._qjl = np.empty((n, pdim), dtype=np.int8)
+                f.readinto(idx._qjl.data)
+                idx._rnorms = np.empty(n, dtype=np.float32)
+                f.readinto(idx._rnorms.data)
 
             for pos in range(n):
                 (id_len,) = struct.unpack("<H", f.read(2))
