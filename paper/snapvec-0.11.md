@@ -142,11 +142,31 @@ point on the recall / disk / latency frontier:
 | `PQSnapIndex` | one-shot `fit` | 24-96x | Product quantisation, full scan |
 | `IVFPQSnapIndex` | one-shot `fit` | 24-96x | IVF + residual PQ, sub-linear search |
 
+Throughout the rest of the paper, `SnapIndex` always refers to the
+RHT + Lloyd-Max scalar implementation; the "RHT" acronym in text
+and the `SnapIndex` class name in tables point to the same thing.
+
 All four persist as CRC32-checksummed single files (`.snpv`,
 `.snpr`, `.snpq`, `.snpi`) with atomic writes.  The runtime
 dependency is NumPy plus the compiled `_fast.pyx` extension
 (bundled in the wheel); nothing else ships in the `[default]`
-install.
+install.  The published macOS wheel also bundles `libomp`
+(embedded via `delocate-wheel` in the release workflow), so end
+users do not need a Homebrew `libomp` or Xcode-side clang to
+install and run the library; a source build from the sdist does
+need `brew install libomp`, documented in `CONTRIBUTING.md`.
+Code footprint: ~3,650 lines of Python plus 67 lines of Cython,
+small enough for a two-person team to audit end-to-end.
+
+**Memory layout at load time.**  `load()` calls currently read
+the whole file into process memory (the coarse centroids, PQ
+codebooks, the `(M, N)` code table, optional float16 rerank
+cache, and the id list).  There is no memory-mapped lazy path:
+at N = 1M with `keep_full_precision=True`, an IVF-PQ index
+instantiates at ~1 GB resident.  For services that keep the
+index warm between queries this is the intended behaviour; for
+cold-start scenarios on shared hosts it is a limitation that
+`mmap` support (tracked as a v0.12 item) would address.
 
 ### 3.1 Cluster-contiguous storage
 
@@ -302,6 +322,19 @@ accumulation; it scales linearly with `N`, reaching ~3 GB
 transiently at N = 1M.  A chunked-accumulation variant is
 tracked as a follow-up.
 
+**End-to-end fit time.**  For the full `IVFPQSnapIndex.fit` +
+`add_batch` pipeline on the FIQA corpus (`N = 57,638`), we
+measured ~32 seconds at M=48, ~56 seconds at M=96, and ~110
+seconds at M=192 on the M4 Pro.  OPQ adds under a second to
+those numbers.  FAISS at matched config is roughly 3x-6x faster
+(~10 s at M=48, ~17 s at M=192) thanks to a heavily-tuned
+in-house k-means; both are comfortably within the "seconds to
+minutes" budget we consider acceptable for a laptop-local
+workflow.  We do not recommend either library for a corpus big
+enough to push fit into hours without rethinking the sampling
+strategy (training on 10-20k rows and indexing the rest is a
+standard move).
+
 ### 4.4 Scale against sqlite-vec
 
 Earlier (pre-competitive-table) we measured snapvec's flagship
@@ -402,6 +435,24 @@ requires one N-sized memcpy per `add_batch` call.  Truly O(1)
 per-row streaming requires a delta-buffer layout (tracked as a
 v0.12 roadmap item).
 
+**OPQ training memory at large N.**  The parametric covariance
+accumulation upcasts the training sample to `float64` for
+numerical stability, which peaks at ~3 GB at N = 1M (dim=384).
+For a laptop with 8-16 GB RAM this is a real out-of-memory risk
+if the caller hands the full corpus to `fit()` instead of a
+sample.  Chunked accumulation that keeps peak memory at a
+constant multiple of `(dim, dim)` is the priority followup for
+v0.11.x so `use_opq=True` is safe to default in large-corpus
+workflows.
+
+**No runtime warning on bad OPQ config.**  OPQ gains collapse at
+`d_sub < 4` (see Section 4.3).  `use_opq=True` is accepted
+silently today; a `UserWarning` from `PQSnapIndex.__init__` /
+`IVFPQSnapIndex.__init__` when `dim / M < 4` is a tiny engineering
+improvement that would help downstream users avoid enabling the
+flag in configurations where it costs latency and disk without
+the corresponding recall win.
+
 **OPQ-P, not OPQ-NP.**  The non-parametric variant that alternates
 between learning the rotation and re-fitting the codebooks is
 reported in the literature as an additional 0.3-0.8 pp recall at
@@ -477,6 +528,16 @@ jina-embeddings) and to be sensitive on embeddings trained
 without L2 normalisation or with heavily sparse coordinates.  We
 explicitly invite users to run the same bench on their own
 corpus before citing the FAISS comparison downstream.
+
+A last engineering point worth stating: the audit surface of
+`snapvec` is about 3,650 lines of pure Python plus a 67-line
+Cython hot path, versus FAISS's tens of thousands of lines of
+C++.  For a two-person ML team that needs to trace a recall
+regression to its root cause, patch an obscure edge case, or
+port a piece of the stack to a new platform, the ability to read
+every line of the library in an afternoon is itself a feature --
+one that the matched-budget performance numbers do not capture
+but that downstream maintainers tend to care about.
 
 ---
 
