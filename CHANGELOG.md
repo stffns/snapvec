@@ -6,6 +6,43 @@ the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.11.1] -- 2026-04-20
+
+Memory-footprint patch.  No API or file-format change; two targeted
+fixes on the fit and load paths so large indices (N = 1M class) stop
+peaking at 2x-10x the final RAM size during those phases.
+
+### Changed
+
+- **`fit_opq_rotation(X, M)`** now accumulates the covariance in
+  16,384-row float64 chunks instead of casting the whole centred
+  matrix to float64 at once.  Peak working memory during OPQ fit
+  drops from ~(n * d * 8) bytes to ~(chunk * d * 8) -- at n=1M and
+  d=384, that is ~3 GB -> ~30 MB transient, independent of n.
+  Numerics are unchanged (same covariance, same eigendecomposition);
+  all existing OPQ determinism/round-trip tests pass.
+
+- **`load()` on `SnapIndex`, `PQSnapIndex`, `IVFPQSnapIndex`, and
+  `ResidualSnapIndex`** now uses `f.readinto(arr.data)` into
+  pre-allocated numpy buffers instead of
+  `np.frombuffer(f.read(...)).copy()`.  The old path held the
+  transient bytes string and the final array simultaneously,
+  roughly doubling peak RAM during load.  Measured on a single
+  process (n=500k, M=192 IVFPQ): peak RSS during load drops from
+  291 MB to 198 MB, a one-codes-array saving that scales linearly
+  with n.
+
+- **`PQSnapIndex.load()`** additionally streams the on-disk (n, M)
+  row-major code block through a small staging buffer, fusing the
+  transpose into the per-chunk copy into the final (M, n)
+  C-contiguous array.  Eliminates the full-size transpose copy
+  that the previous `.T.copy()` path allocated.
+
+### Notes
+
+File format is unchanged (`.snpv` v3, `.snpq` v2, `.snpi` v5,
+`.snpr` v1); existing indices load correctly under the new code.
+
 ## [0.11.0] -- 2026-04-21
 
 First minor bump on the 0.10 line.  Adds optional OPQ rotation
