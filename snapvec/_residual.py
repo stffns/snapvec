@@ -226,7 +226,9 @@ class ResidualSnapIndex(FreezableIndex):
         if q_norm < 1e-10:
             return []
         pdim = self._pdim
-        q_unit = q / q_norm
+        # Python float ``q_norm`` is float64 under pre-NEP-50 numpy; wrap
+        # so ``q_unit`` stays in float32.
+        q_unit = q / np.float32(q_norm)
         q_padded = np.zeros(pdim, dtype=np.float32)
         q_padded[: self.dim] = q_unit
         q_rot = rht(q_padded[None, :], self.seed)[0]

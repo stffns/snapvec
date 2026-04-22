@@ -186,8 +186,14 @@ class PQSnapIndex(FreezableIndex):
             # Re-normalize post-RHT so subspaces see unit-length input
             # (RHT preserves norm up to numerical error, but explicit
             # normalization keeps the ADC score interpretable).
-            # Optimized: ~4x faster than np.linalg.norm(..., axis=1) via einsum
-            rot /= np.sqrt(np.einsum('ij,ij->i', rot, rot))[:, np.newaxis] + 1e-12
+            # Optimized: ~4x faster than np.linalg.norm(..., axis=1) via einsum.
+            # ``1e-12`` wrapped in ``np.float32`` so the divisor stays float32
+            # under pre-NEP-50 numpy (>=1.24); otherwise ``rot`` returns
+            # float64 and silently contradicts the annotation.
+            rot /= (
+                np.sqrt(np.einsum('ij,ij->i', rot, rot))[:, np.newaxis]
+                + np.float32(1e-12)
+            )
             return rot, norms
         if self.use_opq and self._opq_rotation is not None:
             # Rotation is orthogonal, so unit-norm inputs stay unit-norm.
@@ -204,18 +210,21 @@ class PQSnapIndex(FreezableIndex):
         q_norm = float(np.linalg.norm(q))
         if q_norm < 1e-10:
             return np.zeros(self._pdim, dtype=np.float32)
-        q_unit = q / q_norm
+        # ``q_norm`` is a Python float (float64 under pre-NEP-50 numpy);
+        # wrap so the division and the ``+ 1e-12`` epsilon below stay in
+        # float32 without needing a downcasting astype.
+        q_unit = q / np.float32(q_norm)
         if self.use_rht:
             padded = np.zeros(self._pdim, dtype=np.float32)
             padded[: self.dim] = q_unit
             rot = rht(padded[None, :], self.seed)[0]
-            rot /= np.linalg.norm(rot) + 1e-12
+            rot /= np.float32(np.linalg.norm(rot)) + np.float32(1e-12)
             return cast("NDArray[np.float32]", rot)
         if self.use_opq and self._opq_rotation is not None:
             return cast(
                 "NDArray[np.float32]", q_unit @ self._opq_rotation
             )
-        return q_unit
+        return cast("NDArray[np.float32]", q_unit)
 
     # ──────────────────────────────────────────────────────────────── #
     # training                                                          #

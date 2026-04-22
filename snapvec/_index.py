@@ -424,7 +424,11 @@ class SnapIndex(FreezableIndex):
             return []
 
         pdim = self._pdim
-        q_unit: NDArray[np.float32] = q / q_norm
+        # Python float ``q_norm`` is float64 under pre-NEP-50 numpy; wrap
+        # so ``q_unit`` stays in float32.
+        q_unit: NDArray[np.float32] = cast(
+            "NDArray[np.float32]", q / np.float32(q_norm)
+        )
         q_padded: NDArray[np.float32] = np.zeros(pdim, dtype=np.float32)
         q_padded[: self.dim] = q_unit
         q_rot: NDArray[np.float32] = rht(q_padded, self.seed)

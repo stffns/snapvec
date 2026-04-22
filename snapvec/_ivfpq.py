@@ -253,8 +253,14 @@ class IVFPQSnapIndex(FreezableIndex):
             padded = np.zeros((len(arr), self._pdim), dtype=np.float32)
             padded[:, : self.dim] = units
             rot = rht(padded, self.seed)
-            # Optimized: ~4x faster than np.linalg.norm(..., axis=1) via einsum
-            rot /= np.sqrt(np.einsum('ij,ij->i', rot, rot))[:, np.newaxis] + 1e-12
+            # Optimized: ~4x faster than np.linalg.norm(..., axis=1) via einsum.
+            # ``1e-12`` is a Python float (float64 under pre-NEP-50 numpy);
+            # wrap as np.float32 to keep ``rot`` in float32 without needing
+            # a downcasting astype at the return.
+            rot /= (
+                np.sqrt(np.einsum('ij,ij->i', rot, rot))[:, np.newaxis]
+                + np.float32(1e-12)
+            )
             return rot, norms
         if self.use_opq and self._opq_rotation is not None:
             # Rotation is orthogonal, so unit-norm inputs stay unit-norm.
@@ -268,18 +274,21 @@ class IVFPQSnapIndex(FreezableIndex):
         q_norm = float(np.linalg.norm(q))
         if q_norm < 1e-10:
             return np.zeros(self._pdim, dtype=np.float32)
-        q_unit = q / q_norm
+        # ``q_norm`` is a Python float (float64 under pre-NEP-50 numpy);
+        # wrap in np.float32 so ``q / q_norm`` stays in float32.  Same
+        # treatment for the ``1e-12`` epsilon inside the RHT branch.
+        q_unit = q / np.float32(q_norm)
         if self.use_rht:
             padded = np.zeros(self._pdim, dtype=np.float32)
             padded[: self.dim] = q_unit
             rot = rht(padded[None, :], self.seed)[0]
-            rot /= np.linalg.norm(rot) + 1e-12
+            rot /= np.float32(np.linalg.norm(rot)) + np.float32(1e-12)
             return cast("NDArray[np.float32]", rot)
         if self.use_opq and self._opq_rotation is not None:
             return cast(
                 "NDArray[np.float32]", q_unit @ self._opq_rotation
             )
-        return q_unit
+        return cast("NDArray[np.float32]", q_unit)
 
     def _require_fitted(self) -> None:
         if not self._fitted:
@@ -971,7 +980,10 @@ class IVFPQSnapIndex(FreezableIndex):
             padded[:, : self.dim] = Q_unit
             q_pre_all = rht(padded, self.seed)
             # Optimized: ~4x faster than np.linalg.norm(..., axis=1) via einsum
-            q_pre_all /= np.sqrt(np.einsum('ij,ij->i', q_pre_all, q_pre_all))[:, np.newaxis] + 1e-12
+            q_pre_all /= (
+                np.sqrt(np.einsum('ij,ij->i', q_pre_all, q_pre_all))[:, np.newaxis]
+                + np.float32(1e-12)
+            )
         elif self.use_opq and self._opq_rotation is not None:
             # Apply the learned rotation to every query in the batch
             # so search_batch stays consistent with search() -- the
