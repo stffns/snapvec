@@ -154,13 +154,13 @@ class ResidualSnapIndex(FreezableIndex):
                 np.where(raw_norms > 1e-10, raw_norms, np.float32(1.0)),
             )
             units = cast("NDArray[np.float32]", arr / safe[:, None])
-            batch_norms = np.where(raw_norms > 1e-10, raw_norms, 0.0).astype(np.float32)
+            batch_norms = np.where(raw_norms > 1e-10, raw_norms, np.float32(0.0))
 
         pdim = self._pdim
         padded = np.zeros((n, pdim), dtype=np.float32)
         padded[:, : self.dim] = units
         rotated = rht(padded, self.seed)
-        scaled = (rotated * np.sqrt(pdim)).astype(np.float32)
+        scaled = rotated * np.float32(np.sqrt(pdim))
 
         c1 = np.clip(
             np.searchsorted(self._thr1, scaled),
@@ -230,7 +230,7 @@ class ResidualSnapIndex(FreezableIndex):
         q_padded = np.zeros(pdim, dtype=np.float32)
         q_padded[: self.dim] = q_unit
         q_rot = rht(q_padded[None, :], self.seed)[0]
-        q_scaled = (q_rot * np.sqrt(pdim)).astype(np.float32)
+        q_scaled = q_rot * np.float32(np.sqrt(pdim))
 
         if rerank_M is None:
             decoded = self._cent1[self._codes1] + self._sigma_r * self._cent2[self._codes2]

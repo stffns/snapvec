@@ -20,6 +20,7 @@ a ~25× speedup over the naive butterfly at pdim = 512.
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -92,7 +93,12 @@ def rht(x: NDArray[np.float32], seed: int) -> NDArray[np.float32]:
     NDArray[np.float32], same shape as x.
     """
     d = x.shape[-1]
-    y: NDArray[np.float32] = (x * _signs(d, seed)).astype(np.float32)
+    # ``_signs`` returns float32, ``x`` is float32, so ``x * signs`` stays
+    # float32 -- no astype needed.  The ``y / np.sqrt(d)`` divisor is a
+    # numpy float64 scalar (np.sqrt returns float64 even on int input),
+    # which would promote the result to float64.  Wrap in ``np.float32``
+    # so the division stays in float32 instead of upcasting and then
+    # downcasting via astype.
+    y: NDArray[np.float32] = x * _signs(d, seed)
     _fwht_inplace(y)
-    result: NDArray[np.float32] = (y / np.sqrt(d)).astype(np.float32)
-    return result
+    return cast("NDArray[np.float32]", y / np.float32(np.sqrt(d)))

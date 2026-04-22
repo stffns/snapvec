@@ -255,11 +255,13 @@ class IVFPQSnapIndex(FreezableIndex):
             rot = rht(padded, self.seed)
             # Optimized: ~4x faster than np.linalg.norm(..., axis=1) via einsum
             rot /= np.sqrt(np.einsum('ij,ij->i', rot, rot))[:, np.newaxis] + 1e-12
-            return rot.astype(np.float32), norms
+            return rot, norms
         if self.use_opq and self._opq_rotation is not None:
             # Rotation is orthogonal, so unit-norm inputs stay unit-norm.
-            return (units @ self._opq_rotation).astype(np.float32), norms
-        return units.astype(np.float32), norms
+            return cast(
+                "NDArray[np.float32]", units @ self._opq_rotation
+            ), norms
+        return units, norms
 
     def _preprocess_single(self, q: NDArray[np.float32]) -> NDArray[np.float32]:
         q = np.asarray(q, dtype=np.float32)
@@ -275,10 +277,9 @@ class IVFPQSnapIndex(FreezableIndex):
             return cast("NDArray[np.float32]", rot)
         if self.use_opq and self._opq_rotation is not None:
             return cast(
-                "NDArray[np.float32]",
-                (q_unit @ self._opq_rotation).astype(np.float32),
+                "NDArray[np.float32]", q_unit @ self._opq_rotation
             )
-        return q_unit.astype(np.float32)
+        return q_unit
 
     def _require_fitted(self) -> None:
         if not self._fitted:
@@ -334,7 +335,15 @@ class IVFPQSnapIndex(FreezableIndex):
         asn = assign_l2(pre, self._coarse)
         residuals = pre - self._coarse[asn]
         for j in range(self.M):
-            Rj = residuals[:, j * self._d_sub : (j + 1) * self._d_sub].astype(np.float32)
+            # ``residuals[:, slice]`` is a non-contiguous view with stride
+            # = d * 4 bytes.  k-means runs matmul on it, and BLAS is much
+            # faster on contiguous input -- so make the per-subspace slice
+            # contiguous here.  (The earlier ``.astype(np.float32)`` did
+            # this implicitly; calling it out explicitly makes the intent
+            # legible without the "is this dtype guard or a copy?" confusion.)
+            Rj = np.ascontiguousarray(
+                residuals[:, j * self._d_sub : (j + 1) * self._d_sub]
+            )
             self._codebooks[j] = kmeans_mse(
                 Rj, self.K, n_iters=kmeans_iters, seed=self.seed + 1000 + j,
             )
@@ -951,9 +960,12 @@ class IVFPQSnapIndex(FreezableIndex):
         # Optimized: ~4x faster than np.linalg.norm(..., axis=1) via einsum
         q_norms = np.sqrt(np.einsum('ij,ij->i', Q, Q))
         valid = q_norms >= 1e-10
-        safe_norms = np.where(valid, q_norms, 1.0).astype(np.float32)
-        Q_unit = Q / safe_norms[:, None]
+        safe_norms = np.where(valid, q_norms, np.float32(1.0))
+        Q_unit: NDArray[np.float32] = cast(
+            "NDArray[np.float32]", Q / safe_norms[:, None]
+        )
 
+        q_pre_all: NDArray[np.float32]
         if self.use_rht:
             padded = np.zeros((B, self._pdim), dtype=np.float32)
             padded[:, : self.dim] = Q_unit
@@ -964,9 +976,11 @@ class IVFPQSnapIndex(FreezableIndex):
             # Apply the learned rotation to every query in the batch
             # so search_batch stays consistent with search() -- the
             # single-query path rotates via _preprocess_single.
-            q_pre_all = (Q_unit @ self._opq_rotation).astype(np.float32)
+            q_pre_all = cast(
+                "NDArray[np.float32]", Q_unit @ self._opq_rotation
+            )
         else:
-            q_pre_all = Q_unit.astype(np.float32)
+            q_pre_all = Q_unit
 
         # One matmul, the whole batch.
         coarse_dot_all = q_pre_all @ self._coarse.T            # (B, nlist)

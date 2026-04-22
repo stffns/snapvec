@@ -188,11 +188,13 @@ class PQSnapIndex(FreezableIndex):
             # normalization keeps the ADC score interpretable).
             # Optimized: ~4x faster than np.linalg.norm(..., axis=1) via einsum
             rot /= np.sqrt(np.einsum('ij,ij->i', rot, rot))[:, np.newaxis] + 1e-12
-            return rot.astype(np.float32), norms
+            return rot, norms
         if self.use_opq and self._opq_rotation is not None:
             # Rotation is orthogonal, so unit-norm inputs stay unit-norm.
-            return (units @ self._opq_rotation).astype(np.float32), norms
-        return units.astype(np.float32), norms
+            return cast(
+                "NDArray[np.float32]", units @ self._opq_rotation
+            ), norms
+        return units, norms
 
     def _preprocess_single(
         self, q: NDArray[np.float32]
@@ -211,10 +213,9 @@ class PQSnapIndex(FreezableIndex):
             return cast("NDArray[np.float32]", rot)
         if self.use_opq and self._opq_rotation is not None:
             return cast(
-                "NDArray[np.float32]",
-                (q_unit @ self._opq_rotation).astype(np.float32),
+                "NDArray[np.float32]", q_unit @ self._opq_rotation
             )
-        return q_unit.astype(np.float32)
+        return q_unit
 
     # ──────────────────────────────────────────────────────────────── #
     # training                                                          #
