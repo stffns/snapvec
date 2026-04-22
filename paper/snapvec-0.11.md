@@ -28,8 +28,8 @@ hnswlib, and sqlite-vec.  At matched PQ budget (`M = 192`,
 essentially the same recall (0.895 vs 0.906).  With the float16
 rerank pass, `snapvec` reaches recall `0.945` at 345 us p50
 latency -- Pareto-dominant in the sub-500 us band on this corpus.
-With the optional OPQ-P rotation shipped in 0.11.0, `snapvec` at
-the aggressive `M = 48` / 4.9 MB corner reaches recall `0.649`,
+With the optional OPQ-P rotation enabled, `snapvec` at the
+aggressive `M = 48` / 4.9 MB corner reaches recall `0.649`,
 about 4.6 percentage points above FAISS at the same disk budget;
 FAISS wins the same corner on latency (144 us vs 263 us), so that
 operating point becomes a recall-vs-latency pick rather than a
@@ -127,7 +127,7 @@ both corpus (`x -> R x`) and query (`q -> R q`), it preserves
 inner products (the rotation is orthogonal) while making PQ
 quantisation materially tighter on distributions where coordinate
 variance is skewed -- as modern sentence embeddings often are.
-snapvec 0.11.0 ships the parametric variant (OPQ-P): covariance
+snapvec implements the parametric variant (OPQ-P): covariance
 eigendecomposition, round-robin subspace allocation.  The
 non-parametric variant (alternating optimisation of `R` and the
 codebooks) is tracked as a follow-up.
@@ -186,10 +186,10 @@ as a v0.12 item.
 sorted by cluster id with an `offsets` array of length
 `nlist + 1`.  Visiting the `nprobe` top clusters becomes
 `nprobe` contiguous slices rather than a boolean mask over the
-whole corpus.  Streaming ingest in 0.10.3 replaced the previous
-concat-then-argsort-then-reorder with a single per-cluster
-contiguous memcpy, cutting `add_batch` cost by 18 % end-to-end
-on 50k-row streaming runs.
+whole corpus.  Streaming ingest merges a new batch into this
+cluster-contiguous layout with one per-cluster memcpy per call,
+avoiding the concat-then-argsort-then-reorder pattern that would
+otherwise allocate two N-sized copies of `_codes` per batch.
 
 ### 3.2 Compiled ADC kernel
 
@@ -328,14 +328,11 @@ costs.
 Training cost of `fit_opq_rotation` is one eigendecomposition of
 the `(dim, dim)` covariance matrix, measured at **21 ms / 52 MB
 peak** on 10k training rows and **56 ms / 271 MB peak** on 57k
-rows (dim = 384).  Earlier drafts cast the entire centred
-training sample to `float64` in one shot for numerical stability,
-which peaked at ~3 GB transiently at N = 1M.  The shipped 0.11.1
-implementation accumulates the covariance in 16,384-row chunks, so
-peak working memory during the cast is bounded by
-`chunk * dim * 8` bytes (~30 MB at dim = 384) independent of `N`.
-Per-row outer products, accumulator dtype, and eigendecomposition
-are unchanged; all OPQ determinism tests pass bit-identically.
+rows (dim = 384).  The covariance is accumulated in 16,384-row
+chunks with a per-chunk `float64` cast for numerical stability,
+so peak working memory is bounded by `chunk * dim * 8` bytes
+(~30 MB at dim = 384) independent of `N`.  The eigendecomposition
+runs on the `(dim, dim)` matrix that results, regardless of `N`.
 
 **End-to-end fit time.**  For the full `IVFPQSnapIndex.fit` +
 `add_batch` pipeline on the FIQA corpus (`N = 57,638`), we
@@ -446,20 +443,16 @@ constraint and is explicitly out of scope for v0.x.
 Hybrid text + vector retrieval with RRF fusion lives one layer up,
 in `vstash`.
 
-**Write path still O(N) per add_batch.**  Although 0.10.3 cut the
-constant factor by ~18 %, the cluster-contiguous layout still
-requires one N-sized memcpy per `add_batch` call.  Truly O(1)
-per-row streaming requires a delta-buffer layout (tracked as a
-v0.12 roadmap item).
+**Write path is O(N) per add_batch.**  The cluster-contiguous
+layout requires one N-sized memcpy per `add_batch` call.  Truly
+O(1) per-row streaming requires a delta-buffer layout (tracked
+as a v0.12 roadmap item).
 
-**Load path still materialises the full corpus in RAM.**  Even
-after the 0.11.1 memory patch (`readinto` into pre-allocated
-numpy buffers, dropping the ~2x transient that
-`frombuffer(f.read(...)).copy()` held), `load()` still allocates
-an (M, N) codes array, plus the optional fp16 rerank cache and
-the id list.  A memory-mapped lazy path that keeps pages on disk
-and faults them in as probes touch clusters is the next big
-footprint win and is tracked as a v0.12 item.
+**Load path materialises the full corpus in RAM.**  `load()`
+allocates an (M, N) codes array, plus the optional fp16 rerank
+cache and the id list.  A memory-mapped lazy path that keeps
+pages on disk and faults them in as probes touch clusters is the
+next big footprint win and is tracked as a v0.12 item.
 
 **No runtime warning on bad OPQ config.**  OPQ gains collapse at
 `d_sub < 4` (see Section 4.3).  `use_opq=True` is accepted
@@ -472,7 +465,7 @@ the corresponding recall win.
 **OPQ-P, not OPQ-NP.**  The non-parametric variant that alternates
 between learning the rotation and re-fitting the codebooks is
 reported in the literature as an additional 0.3-0.8 pp recall at
-the cost of a slower fit.  Not in 0.11.0.
+the cost of a slower fit.  Not currently implemented.
 
 **Single-writer concurrency.**  The library documents a
 single-writer multi-reader contract.  A `freeze()` call is
