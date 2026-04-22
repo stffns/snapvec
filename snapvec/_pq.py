@@ -494,13 +494,26 @@ class PQSnapIndex(FreezableIndex):
                 )
             idx._fitted = True
             if n > 0:
-                idx._codes = (
-                    np.frombuffer(f.read(n * M), dtype=np.uint8)
-                    .reshape(n, M)
-                    .T.copy()
-                )
+                # On disk codes are laid out (n, M) row-major (see save:
+                # ``codes.T.tobytes()``), but we want (M, n) C-contiguous
+                # in RAM for the ADC column-major kernel.  The old path
+                # was ``frombuffer(f.read(n*M)).reshape(n, M).T.copy()``
+                # which holds the bytes string *and* the final array at
+                # the same time, doubling peak memory during load.
+                # Instead, allocate the final (M, n) buffer up front and
+                # stream the file through a small staging buffer,
+                # copying each chunk with the transpose fused in.
+                idx._codes = np.empty((M, n), dtype=np.uint8)
+                chunk_n = 16_384
+                staging = np.empty((chunk_n, M), dtype=np.uint8)
+                for start in range(0, n, chunk_n):
+                    cur = min(chunk_n, n - start)
+                    f.readinto(staging[:cur].data)
+                    idx._codes[:, start : start + cur] = staging[:cur].T
+                del staging
                 if not normalized:
-                    idx._norms = np.frombuffer(f.read(n * 4), dtype=np.float32).copy()
+                    idx._norms = np.empty(n, dtype=np.float32)
+                    f.readinto(idx._norms.data)
                 idx._ids = []
                 for _ in range(n):
                     (ln,) = struct.unpack("<H", f.read(2))

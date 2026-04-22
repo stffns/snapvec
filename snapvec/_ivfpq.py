@@ -1216,21 +1216,31 @@ class IVFPQSnapIndex(FreezableIndex):
                 raise ValueError("offsets must be non-decreasing")
             idx._fitted = True
             if n > 0:
-                # v1 stored codes as (n, M) row-major; v2 stores
-                # (M, n) column-major.  Transparently transpose v1 on
-                # load so search/add see the v2 layout.
+                # v1 stored codes as (n, M) row-major; v2+ stores
+                # (M, n) column-major.  In both cases ``readinto`` into
+                # a pre-allocated buffer avoids the ~n*M byte transient
+                # that the old ``frombuffer(f.read(...)).copy()`` path
+                # held alongside the final array (peak ~2x file size
+                # during load -- painful at n=1M).
                 if version == 1:
-                    idx._codes = (
-                        np.frombuffer(f.read(n * M), dtype=np.uint8)
-                        .reshape(n, M).T.copy()
-                    )
+                    # v1: stream file through a small staging buffer and
+                    # copy each chunk into the final (M, n) array with
+                    # the transpose fused in -- never materialises the
+                    # full (n, M) byte buffer.
+                    idx._codes = np.empty((M, n), dtype=np.uint8)
+                    chunk_n = 16_384
+                    staging = np.empty((chunk_n, M), dtype=np.uint8)
+                    for start in range(0, n, chunk_n):
+                        cur = min(chunk_n, n - start)
+                        f.readinto(staging[:cur].data)
+                        idx._codes[:, start : start + cur] = staging[:cur].T
+                    del staging
                 else:
-                    idx._codes = (
-                        np.frombuffer(f.read(M * n), dtype=np.uint8)
-                        .reshape(M, n).copy()
-                    )
+                    idx._codes = np.empty((M, n), dtype=np.uint8)
+                    f.readinto(idx._codes.data)
                 if not normalized:
-                    idx._norms = np.frombuffer(f.read(n * 4), dtype=np.float32).copy()
+                    idx._norms = np.empty(n, dtype=np.float32)
+                    f.readinto(idx._norms.data)
                 if keep_full_precision:
                     # v3 stored the cache as float32 (4 bytes/value);
                     # v4+ uses float16 (2 bytes/value).  Cast the v3
@@ -1255,10 +1265,10 @@ class IVFPQSnapIndex(FreezableIndex):
                             ).reshape(end - start, pdim)
                             idx._full_precision[start:end] = chunk
                     else:
-                        idx._full_precision = (
-                            np.frombuffer(f.read(n * pdim * 2), dtype=np.float16)
-                            .reshape(n, pdim).copy()
+                        idx._full_precision = np.empty(
+                            (n, pdim), dtype=np.float16,
                         )
+                        f.readinto(idx._full_precision.data)
                 idx._ids_by_row = []
                 for _ in range(n):
                     (ln,) = struct.unpack("<H", f.read(2))
