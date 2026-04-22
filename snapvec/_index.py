@@ -282,7 +282,11 @@ class SnapIndex(FreezableIndex):
         padded: NDArray[np.float32] = np.zeros((n, pdim), dtype=np.float32)
         padded[:, : self.dim] = units
         rotated: NDArray[np.float32] = rht(padded, self.seed)
-        scaled: NDArray[np.float32] = rotated * np.sqrt(pdim)
+        # ``np.sqrt(pdim)`` returns a numpy float64 scalar (even on an int
+        # input), which would promote the float32 ``rotated`` to float64
+        # -- silently contradicting the NDArray[np.float32] annotation.
+        # Wrap in ``np.float32`` so the multiplication stays in float32.
+        scaled: NDArray[np.float32] = rotated * np.float32(np.sqrt(pdim))
 
         # 3. MSE quantization at _mse_bits
         _, boundaries = get_codebook(self._mse_bits)
@@ -297,16 +301,16 @@ class SnapIndex(FreezableIndex):
         if self.use_prod:
             assert self._S is not None
             reconstructed: NDArray[np.float32] = self._centroids[batch_idx]
-            r_scaled: NDArray[np.float32] = (scaled - reconstructed).astype(np.float32)
+            r_scaled: NDArray[np.float32] = scaled - reconstructed
             # sign(S·r_rot) = sign(S·r_scaled) — scale-invariant
             S_r: NDArray[np.float32] = (self._S @ r_scaled.T).T
             qjl_signs = np.sign(S_r).astype(np.int8)
             qjl_signs[qjl_signs == 0] = 1
             # Store ‖r_rot‖ = ‖r_scaled‖/√pdim (unscaled space norm)
             # Optimized: ~4x faster than np.linalg.norm(..., axis=1) via einsum
-            residual_norms = (
-                np.sqrt(np.einsum('ij,ij->i', r_scaled, r_scaled)) / np.sqrt(pdim)
-            ).astype(np.float32)
+            residual_norms = np.sqrt(
+                np.einsum('ij,ij->i', r_scaled, r_scaled)
+            ) / np.float32(np.sqrt(pdim))
 
         # 5. RAM bit-pack indices when possible
         if self._can_pack:
@@ -420,11 +424,17 @@ class SnapIndex(FreezableIndex):
             return []
 
         pdim = self._pdim
-        q_unit: NDArray[np.float32] = q / q_norm
+        # Python float ``q_norm`` is float64 under pre-NEP-50 numpy; wrap
+        # so ``q_unit`` stays in float32.
+        q_unit: NDArray[np.float32] = cast(
+            "NDArray[np.float32]", q / np.float32(q_norm)
+        )
         q_padded: NDArray[np.float32] = np.zeros(pdim, dtype=np.float32)
         q_padded[: self.dim] = q_unit
         q_rot: NDArray[np.float32] = rht(q_padded, self.seed)
-        q_scaled: NDArray[np.float32] = (q_rot * np.sqrt(pdim)).astype(np.float32)
+        # np.sqrt(int) returns a numpy float64 scalar; wrap in np.float32
+        # so the multiply stays in float32 (matches the type annotation).
+        q_scaled: NDArray[np.float32] = q_rot * np.float32(np.sqrt(pdim))
 
         # Resolve filter_ids → sorted row positions (O(|filter_ids|))
         if filter_ids is not None:
@@ -455,8 +465,11 @@ class SnapIndex(FreezableIndex):
             # Filtered subset — skip cache, compute directly on the slice
             indices = self._unpack_to_indices(packed_slice)
             expanded: NDArray[np.float16] = self._centroids[indices].astype(np.float16)
-            raw = (expanded @ q_scaled).astype(np.float32)
-            scores = (raw / pdim).astype(np.float32)
+            # fp16 @ fp32 matmul already yields float32; divide by a
+            # Python int preserves float32 under every supported numpy
+            # version.  No astype needed.
+            raw = expanded @ q_scaled
+            scores = cast("NDArray[np.float32]", raw / pdim)
 
         # QJL correction (prod mode)
         if self.use_prod and qjl is not None and rnorms is not None:
@@ -481,9 +494,10 @@ class SnapIndex(FreezableIndex):
         if self._cache is None:
             indices = self._unpack_to_indices()
             self._cache = self._centroids[indices].astype(np.float16)
-        raw = (self._cache @ q_scaled).astype(np.float32)
-        result: NDArray[np.float32] = (raw / self._pdim).astype(np.float32)
-        return result
+        # fp16 @ fp32 matmul already yields float32; divide by a Python
+        # int preserves float32.  No astype needed.
+        raw = self._cache @ q_scaled
+        return cast("NDArray[np.float32]", raw / self._pdim)
 
     def _search_chunked(
         self,
@@ -505,7 +519,7 @@ class SnapIndex(FreezableIndex):
             chunk: NDArray[np.float16] = self._centroids[
                 chunk_idx
             ].astype(np.float16)
-            scores[start:end] = (chunk @ q_scaled).astype(np.float32) / self._pdim
+            scores[start:end] = (chunk @ q_scaled) / self._pdim
         return scores
 
     def _apply_qjl_arrays(
@@ -523,13 +537,22 @@ class SnapIndex(FreezableIndex):
         Accepts explicit qjl/rnorms arrays to support filtered subsets.
         """
         assert self._S is not None
-        q_unit_rot: NDArray[np.float32] = q_scaled / np.sqrt(self._pdim)
+        # np.sqrt(int) and np.sqrt(float) return numpy float64 scalars
+        # that would upcast the float32 arrays they multiply; wrap each
+        # scalar so the whole chain stays float32 under pre-NEP-50 numpy.
+        q_unit_rot: NDArray[np.float32] = cast(
+            "NDArray[np.float32]",
+            q_scaled / np.float32(np.sqrt(self._pdim)),
+        )
         S_q: NDArray[np.float32] = self._S @ q_unit_rot
         qjl_dots: NDArray[np.float32] = np.dot(qjl, S_q)
-        correction: NDArray[np.float32] = (
-            np.sqrt(np.pi / 2.0) / self._pdim * rnorms * qjl_dots
+        correction: NDArray[np.float32] = cast(
+            "NDArray[np.float32]",
+            np.float32(np.sqrt(np.pi / 2.0) / self._pdim)
+            * rnorms
+            * qjl_dots,
         )
-        return scores + correction
+        return cast("NDArray[np.float32]", scores + correction)
 
     # ──────────────────────────────────────────────────────────────────── #
     # Persistence                                                           #
