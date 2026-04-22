@@ -12,7 +12,7 @@ result saves a future contributor from walking the same path twice.
 
 Do **not** write an ADR to describe obvious choices, to document what
 the code already says, or to narrate a release ("we did X in v0.10.3").
-Release deltas belong in [`CHANGELOG.md`](../../CHANGELOG.md).
+Release deltas belong in the [Changelog](../changelog.md).
 
 ## Format
 
