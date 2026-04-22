@@ -38,7 +38,11 @@ single winner.
 We do **not** claim generality beyond this dataset and hardware
 class.  The purpose of this note is to document reproducible
 numbers and expose the engineering tradeoffs, not to argue for a
-new algorithm.  All code and benchmarks are open source (MIT) at
+new algorithm.  A secondary, non-graphable point: the library's
+audit surface is roughly 3,650 lines of Python plus a 67-line
+Cython hot path -- small enough for a two-person team to read
+end-to-end when tracing a regression or porting to a new
+platform.  All code and benchmarks are open source (MIT) at
 <https://github.com/stffns/snapvec>.
 
 ---
@@ -146,8 +150,12 @@ Throughout the rest of the paper, `SnapIndex` always refers to the
 RHT + Lloyd-Max scalar implementation; the "RHT" acronym in text
 and the `SnapIndex` class name in tables point to the same thing.
 
-All four persist as CRC32-checksummed single files (`.snpv`,
-`.snpr`, `.snpq`, `.snpi`) with atomic writes.  The runtime
+All four persist as single files (`.snpv`, `.snpr`, `.snpq`,
+`.snpi`) with atomic writes (write-to-temp + rename) and a
+trailing CRC32 checksum that is **verified on every `load()`
+call** -- corrupted files raise `ValueError` with the path and
+the expected/actual digest instead of returning silently-wrong
+data.  The runtime
 dependency is NumPy plus the compiled `_fast.pyx` extension
 (bundled in the wheel); nothing else ships in the `[default]`
 install.  The published macOS wheel also bundles `libomp`
@@ -164,9 +172,13 @@ codebooks, the `(M, N)` code table, optional float16 rerank
 cache, and the id list).  There is no memory-mapped lazy path:
 at N = 1M with `keep_full_precision=True`, an IVF-PQ index
 instantiates at ~1 GB resident.  For services that keep the
-index warm between queries this is the intended behaviour; for
-cold-start scenarios on shared hosts it is a limitation that
-`mmap` support (tracked as a v0.12 item) would address.
+index warm between queries this is the intended behaviour.  It
+also means the **maximum usable corpus size is bounded by host
+RAM (plus swap)**: a file larger than physical memory will fail
+to `load()` with a `MemoryError` rather than degrading to disk
+paging, which is a real constraint for N approaching 10M on a
+16 GB laptop and a major motivator for the `mmap` path tracked
+as a v0.12 item.
 
 ### 3.1 Cluster-contiguous storage
 
@@ -327,13 +339,15 @@ tracked as a follow-up.
 measured ~32 seconds at M=48, ~56 seconds at M=96, and ~110
 seconds at M=192 on the M4 Pro.  OPQ adds under a second to
 those numbers.  FAISS at matched config is roughly 3x-6x faster
-(~10 s at M=48, ~17 s at M=192) thanks to a heavily-tuned
-in-house k-means; both are comfortably within the "seconds to
-minutes" budget we consider acceptable for a laptop-local
-workflow.  We do not recommend either library for a corpus big
-enough to push fit into hours without rethinking the sampling
-strategy (training on 10-20k rows and indexing the rest is a
-standard move).
+(~10 s at M=48, ~17 s at M=192).  The gap is not a code
+inefficiency on snapvec's side; it's the cost of building the
+training pipeline on top of NumPy + a single Cython hot path
+instead of pulling in a dedicated C++ k-means implementation.
+Both libraries sit comfortably within the "seconds to minutes"
+budget for a laptop-local workflow.  We do not recommend either
+for a corpus big enough to push fit into hours without first
+rethinking the sampling strategy (training on 10-20k rows and
+indexing the rest is the standard move).
 
 ### 4.4 Scale against sqlite-vec
 
