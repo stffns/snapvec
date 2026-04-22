@@ -18,8 +18,10 @@ index file must be a single self-contained artefact, and (iii)
 per-query latency must stay under a few hundred microseconds with
 recall close to float32 brute-force.  `snapvec` packages four
 well-known index types (scalar `SnapIndex`, residual scalar,
-`PQSnapIndex`, `IVFPQSnapIndex`) with one Cython+OpenMP kernel for
-the asymmetric-distance hot path and no other native dependencies.
+`PQSnapIndex`, `IVFPQSnapIndex`) with a single Cython+OpenMP
+extension module (two entry points: a pure-PQ full-scan kernel and
+a fused gather+ADC kernel for IVF-PQ probing) and no other native
+dependencies.
 
 We report a single-dataset quantitative comparison on BEIR FIQA
 (`N = 57,638`, `dim = 384`, BGE-small) against FAISS IVFPQ,
@@ -39,7 +41,7 @@ We do **not** claim generality beyond this dataset and hardware
 class.  The purpose of this note is to document reproducible
 numbers and expose the engineering tradeoffs, not to argue for a
 new algorithm.  A secondary, non-graphable point: the library's
-audit surface is roughly 3,650 lines of Python plus a 67-line
+audit surface is roughly 3,750 lines of Python plus a 67-line
 Cython hot path -- small enough for a two-person team to read
 end-to-end when tracing a regression or porting to a new
 platform.  All code and benchmarks are open source (MIT) at
@@ -163,7 +165,7 @@ install.  The published macOS wheel also bundles `libomp`
 users do not need a Homebrew `libomp` or Xcode-side clang to
 install and run the library; a source build from the sdist does
 need `brew install libomp`, documented in `CONTRIBUTING.md`.
-Code footprint: ~3,650 lines of Python plus 67 lines of Cython,
+Code footprint: ~3,750 lines of Python plus 67 lines of Cython,
 small enough for a two-person team to audit end-to-end.
 
 **Memory layout at load time.**  `load()` calls currently read
@@ -326,13 +328,16 @@ preprocess (1.6 us per query on 384-dim), hidden by the other
 costs.
 
 Training cost of `fit_opq_rotation` is one eigendecomposition of
-the `(dim, dim)` covariance matrix, measured at **21 ms / 52 MB
-peak** on 10k training rows and **56 ms / 271 MB peak** on 57k
-rows (dim = 384).  The covariance is accumulated in 16,384-row
-chunks with a per-chunk `float64` cast for numerical stability,
-so peak working memory is bounded by `chunk * dim * 8` bytes
-(~30 MB at dim = 384) independent of `N`.  The eigendecomposition
-runs on the `(dim, dim)` matrix that results, regardless of `N`.
+the `(dim, dim)` covariance matrix, measured at ~21 ms on 10k
+training rows and ~56 ms on 57k rows (dim = 384, M4 Pro).  The
+covariance is accumulated in 16,384-row chunks with a per-chunk
+`float64` cast for numerical stability, so peak working memory is
+bounded by `chunk * dim * 8` bytes (~30 MB at dim = 384)
+independent of `N`.  The eigendecomposition runs on the
+`(dim, dim)` matrix that results, regardless of `N`.  The chunked
+accumulation path shipped as a post-0.11.0 memory fix; the 0.11.0
+release used a single-shot `float64` cast of the whole centred
+matrix and its peak scaled linearly in `N`.
 
 **End-to-end fit time.**  For the full `IVFPQSnapIndex.fit` +
 `add_batch` pipeline on the FIQA corpus (`N = 57,638`), we
@@ -539,7 +544,7 @@ explicitly invite users to run the same bench on their own
 corpus before citing the FAISS comparison downstream.
 
 A last engineering point worth stating: the audit surface of
-`snapvec` is about 3,650 lines of pure Python plus a 67-line
+`snapvec` is about 3,750 lines of pure Python plus a 67-line
 Cython hot path, versus FAISS's tens of thousands of lines of
 C++.  For a two-person ML team that needs to trace a recall
 regression to its root cause, patch an obscure edge case, or
