@@ -89,4 +89,11 @@ nav:
       - IVFPQSnapIndex: api/ivf-pq.md
       - ResidualSnapIndex: api/residual.md
       - Helpers: api/helpers.md
+  - Decisions (ADRs):
+      - Overview: adr/README.md
+      - "0001: RHT off by default in PQ": adr/0001-rht-off-by-default-in-pq.md
+      - "0002: early_stop for IVF probing parked": adr/0002-early-stop-for-ivf-probing-parked.md
+      - "0003: OPQ-P over OPQ-NP": adr/0003-opq-p-over-opq-np.md
+      - "0004: Cluster-contiguous codes": adr/0004-cluster-contiguous-column-major-codes.md
+      - "0005: Memory-budget discipline": adr/0005-memory-budget-discipline.md
   - Changelog: changelog.md
