@@ -1,6 +1,6 @@
 # snapvec: an engineering note on compressed ANN for local-first RAG
 
-**Jayson Steffens** -- stffens@gmail.com -- Buenos Aires, Argentina
+**Jayson Steffens** -- stffens@gmail.com
 
 Version 0.11.0.  Draft, 2026-04-22.
 
