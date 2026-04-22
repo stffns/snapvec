@@ -328,11 +328,14 @@ costs.
 Training cost of `fit_opq_rotation` is one eigendecomposition of
 the `(dim, dim)` covariance matrix, measured at **21 ms / 52 MB
 peak** on 10k training rows and **56 ms / 271 MB peak** on 57k
-rows (dim = 384).  The memory peak comes from an intermediate
-`float64` cast for numerical stability during covariance
-accumulation; it scales linearly with `N`, reaching ~3 GB
-transiently at N = 1M.  A chunked-accumulation variant is
-tracked as a follow-up.
+rows (dim = 384).  Earlier drafts cast the entire centred
+training sample to `float64` in one shot for numerical stability,
+which peaked at ~3 GB transiently at N = 1M.  The shipped 0.11.1
+implementation accumulates the covariance in 16,384-row chunks, so
+peak working memory during the cast is bounded by
+`chunk * dim * 8` bytes (~30 MB at dim = 384) independent of `N`.
+Per-row outer products, accumulator dtype, and eigendecomposition
+are unchanged; all OPQ determinism tests pass bit-identically.
 
 **End-to-end fit time.**  For the full `IVFPQSnapIndex.fit` +
 `add_batch` pipeline on the FIQA corpus (`N = 57,638`), we
@@ -449,15 +452,14 @@ requires one N-sized memcpy per `add_batch` call.  Truly O(1)
 per-row streaming requires a delta-buffer layout (tracked as a
 v0.12 roadmap item).
 
-**OPQ training memory at large N.**  The parametric covariance
-accumulation upcasts the training sample to `float64` for
-numerical stability, which peaks at ~3 GB at N = 1M (dim=384).
-For a laptop with 8-16 GB RAM this is a real out-of-memory risk
-if the caller hands the full corpus to `fit()` instead of a
-sample.  Chunked accumulation that keeps peak memory at a
-constant multiple of `(dim, dim)` is the priority followup for
-v0.11.x so `use_opq=True` is safe to default in large-corpus
-workflows.
+**Load path still materialises the full corpus in RAM.**  Even
+after the 0.11.1 memory patch (`readinto` into pre-allocated
+numpy buffers, dropping the ~2x transient that
+`frombuffer(f.read(...)).copy()` held), `load()` still allocates
+an (M, N) codes array, plus the optional fp16 rerank cache and
+the id list.  A memory-mapped lazy path that keeps pages on disk
+and faults them in as probes touch clusters is the next big
+footprint win and is tracked as a v0.12 item.
 
 **No runtime warning on bad OPQ config.**  OPQ gains collapse at
 `d_sub < 4` (see Section 4.3).  `use_opq=True` is accepted
