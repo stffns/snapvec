@@ -289,9 +289,10 @@ For BGE-small (dim=384, float32 baseline = 1536 B/vec):
 
 ```bash
 pip install -e ".[dev]"
-python experiments/bench_v090_fiqa.py               # FIQA recall / latency
+python experiments/bench_competitive.py             # Pareto: snapvec vs FAISS vs hnswlib vs sqlite-vec
+python experiments/bench_ivfpq_opq.py               # OPQ vs no-OPQ recall sweep
 python experiments/bench_ivf_pq_threading.py        # search_batch threading curve
-python experiments/bench_sqlite_vec_baseline.py     # sqlite-vec comparison
+python experiments/bench_sqlite_vec_baseline.py     # sqlite-vec scale comparison
 ```
 
 The `experiments/` folder is WIP; expect rough edges. A first-class

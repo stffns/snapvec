@@ -3,9 +3,8 @@
 Run this in a single Colab cell to embed FIQA (~57 k) or HotpotQA
 (~100 k) with BGE-small-en-v1.5 in under a minute on an A100, save as
 ``.npy``, and download to your laptop.  The local benches
-(``bench_ivf_pq_1m_baseline.py``, ``_profile_add_batch_1m.py``) pick
-this up automatically when placed at
-``experiments/.cache_fiqa_bge_small.npy``.
+(``bench_competitive.py``, ``bench_ivfpq_opq.py``) pick this up
+automatically when placed at ``experiments/.cache_fiqa_bge_small.npy``.
 
 Why this exists: fastembed CPU is too slow / crash-prone for embedding
 50 k+ docs on a laptop, and we want a *real* diverse corpus (not the

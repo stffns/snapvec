@@ -509,7 +509,7 @@ python experiments/bench_competitive.py
 python experiments/bench_ivfpq_opq.py
 
 # Section 4.5 threading curve
-python experiments/bench_ivfpq_threading.py
+python experiments/bench_ivf_pq_threading.py
 
 # Pareto plot (reads the hard-coded rows from Section 4.2)
 python experiments/plot_pareto.py docs/_static/pareto.png
