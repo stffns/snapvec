@@ -23,7 +23,8 @@
 ```bash
 ruff check snapvec/ tests/
 pytest -q
-mypy --strict snapvec/   # 17 errors as of 2026-04-20, warning-only in CI
+mypy --strict snapvec/   # clean as of v0.11.1 (2026-04-23); tests/ keeps
+                         # `disallow_untyped_defs = false` by design
 ```
 
 ## File format invariants
