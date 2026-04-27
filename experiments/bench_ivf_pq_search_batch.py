@@ -66,7 +66,7 @@ def main() -> None:
         dim=corpus.shape[1], nlist=NLIST, M=M, K=K,
         normalized=True, seed=SEED,
     )
-    print(f"\nfit + add…")
+    print("\nfit + add…")
     t0 = perf_counter()
     idx.fit(corpus, kmeans_iters=15)
     idx.add_batch(list(range(len(corpus))), corpus)
