@@ -10,8 +10,6 @@ are dominated by the fit phase).
 from __future__ import annotations
 
 import argparse
-import os
-import pickle
 import resource
 import subprocess
 import sys
