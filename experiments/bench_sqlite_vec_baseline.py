@@ -160,7 +160,7 @@ def main() -> None:
 
         corpus = augment_corpus(base_corpus, target_n, rng)
 
-        print(f"  Brute-force ground truth...", flush=True)
+        print("  Brute-force ground truth...", flush=True)
         t0 = perf_counter()
         truth = brute_topk(queries, corpus)
         print(f"  done in {perf_counter() - t0:.1f}s")
