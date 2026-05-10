@@ -16,7 +16,6 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import Any
 
 from .indexer import build_index
 from .store import DEFAULT_STORE_DIR, Store
@@ -67,7 +66,7 @@ def cmd_init(args: argparse.Namespace) -> None:
     print(f"  chunks          : {s['chunks']}")
     print(f"  compression     : {s['compression_ratio']}x vs float32")
     print(f"  disk footprint  : {s['disk_bytes'] / 1024:.1f} KB")
-    print(f"\nindex ready.  try: notes-rag ask \"your question\"")
+    print("\nindex ready.  try: notes-rag ask \"your question\"")
 
 
 def cmd_ask(args: argparse.Namespace) -> None:

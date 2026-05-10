@@ -91,7 +91,7 @@ def main() -> None:
 
     print(f"corpus  : {corpus.shape}", flush=True)
     print(f"queries : {queries.shape}", flush=True)
-    print(f"\nbrute-force ground truth...", flush=True)
+    print("\nbrute-force ground truth...", flush=True)
     truth = brute_topk(queries, corpus)
     print()
 
