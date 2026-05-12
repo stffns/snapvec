@@ -1,3 +1,6 @@
 ## 2024-05-18 - Fast row-wise Euclidean norm in pure NumPy
 **Learning:** In performance-critical paths, computing the batch norm of a 2D array via `np.linalg.norm(arr, axis=1)` is relatively slow. Using `np.sqrt(np.einsum('ij,ij->i', arr, arr))` is significantly faster (~4x speedup on a laptop CPU for typical batch sizes). If `keepdims=True` behavior is needed, appending `[:, np.newaxis]` matches the original shape seamlessly.
 **Action:** Always prefer `np.sqrt(np.einsum('ij,ij->i', arr, arr))` over `np.linalg.norm(arr, axis=1)` when computing row-wise vector norms in NumPy to eliminate dispatch overhead and improve execution speed.
+## 2024-05-18 - Fast large dictionary mapping creations
+**Learning:** For large mapping creations like `_id_to_pos` mappings from list of ids, replacing manual loop iterations `for i, k in enumerate(keys): d[k] = start + i` with `dict.update(zip(keys, range(start, start + len(keys))))` and `{k: i for i, k in enumerate(keys)}` with `dict(zip(keys, range(len(keys))))` is faster by moving the loop from Python level to the C-level internals.
+**Action:** Use `dict.update(zip(...))` or `dict(zip(...))` instead of manual mapping updates using `for` loops or dict comprehensions when adding a large batch of items.
