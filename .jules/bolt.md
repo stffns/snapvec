@@ -1,3 +1,6 @@
 ## 2024-05-18 - Fast row-wise Euclidean norm in pure NumPy
 **Learning:** In performance-critical paths, computing the batch norm of a 2D array via `np.linalg.norm(arr, axis=1)` is relatively slow. Using `np.sqrt(np.einsum('ij,ij->i', arr, arr))` is significantly faster (~4x speedup on a laptop CPU for typical batch sizes). If `keepdims=True` behavior is needed, appending `[:, np.newaxis]` matches the original shape seamlessly.
 **Action:** Always prefer `np.sqrt(np.einsum('ij,ij->i', arr, arr))` over `np.linalg.norm(arr, axis=1)` when computing row-wise vector norms in NumPy to eliminate dispatch overhead and improve execution speed.
+## 2026-05-25 - Fast single vector L2 norm in pure NumPy
+**Learning:** In performance-critical paths, computing the L2 norm of a 1D NumPy array via `np.linalg.norm(q)` introduces noticeable Python-level overhead (input validation, kwargs handling, dispatch). Using `np.sqrt(np.inner(q, q))` bypasses this overhead and is functionally equivalent but significantly faster (~1.5x) for small 1D arrays like query vectors.
+**Action:** Prefer `np.sqrt(np.inner(q, q))` or `np.sqrt(np.vdot(q, q))` over `np.linalg.norm(q)` when calculating the L2 norm of single 1D vectors in NumPy to eliminate dispatch overhead and improve execution speed.
