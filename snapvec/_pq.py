@@ -207,8 +207,7 @@ class PQSnapIndex(FreezableIndex):
     ) -> NDArray[np.float32]:
         """Single-vector version of ``_preprocess``; returns unit-length."""
         q = np.asarray(q, dtype=np.float32)
-        # Optimized: ~1.4x faster than np.linalg.norm() for 1D arrays
-        q_norm = float(np.sqrt(np.vdot(q, q)))
+        q_norm = float(np.linalg.norm(q))
         if q_norm < 1e-10:
             return np.zeros(self._pdim, dtype=np.float32)
         # ``q_norm`` is a Python float (float64 under pre-NEP-50 numpy);
@@ -219,8 +218,7 @@ class PQSnapIndex(FreezableIndex):
             padded = np.zeros(self._pdim, dtype=np.float32)
             padded[: self.dim] = q_unit
             rot = rht(padded[None, :], self.seed)[0]
-            # Optimized: ~1.4x faster than np.linalg.norm() for 1D arrays
-            rot /= np.float32(np.sqrt(np.vdot(rot, rot))) + np.float32(1e-12)
+            rot /= np.float32(np.linalg.norm(rot)) + np.float32(1e-12)
             return cast("NDArray[np.float32]", rot)
         if self.use_opq and self._opq_rotation is not None:
             return cast(
@@ -318,8 +316,8 @@ class PQSnapIndex(FreezableIndex):
 
         start = len(self._ids)
         self._ids.extend(ids)
-        for i, id_val in enumerate(ids):
-            self._id_to_pos[id_val] = start + i
+        # Optimized: Faster dictionary updates by pushing iteration to C layer.
+        self._id_to_pos.update(zip(ids, range(start, start + len(ids))))
         self._codes = (
             codes if self._codes.shape[1] == 0
             else np.concatenate([self._codes, codes], axis=1)
@@ -357,8 +355,7 @@ class PQSnapIndex(FreezableIndex):
         if not self._ids:
             return []
         q = np.asarray(query, dtype=np.float32)
-        # Optimized: ~1.4x faster than np.linalg.norm() for 1D arrays
-        if float(np.sqrt(np.vdot(q, q))) < 1e-10:
+        if float(np.linalg.norm(q)) < 1e-10:
             return []
         q_pre = self._preprocess_single(q)
 
@@ -531,5 +528,6 @@ class PQSnapIndex(FreezableIndex):
                 for _ in range(n):
                     (ln,) = struct.unpack("<H", f.read(2))
                     idx._ids.append(_decode_id(f.read(ln).decode("utf-8")))
-                idx._id_to_pos = {v: i for i, v in enumerate(idx._ids)}
+                # Optimized: Faster dictionary comprehension by pushing iteration to C layer.
+                idx._id_to_pos = dict(zip(idx._ids, range(len(idx._ids))))
         return idx

@@ -271,8 +271,7 @@ class IVFPQSnapIndex(FreezableIndex):
 
     def _preprocess_single(self, q: NDArray[np.float32]) -> NDArray[np.float32]:
         q = np.asarray(q, dtype=np.float32)
-        # Optimized: ~1.4x faster than np.linalg.norm() for 1D arrays
-        q_norm = float(np.sqrt(np.vdot(q, q)))
+        q_norm = float(np.linalg.norm(q))
         if q_norm < 1e-10:
             return np.zeros(self._pdim, dtype=np.float32)
         # ``q_norm`` is a Python float (float64 under pre-NEP-50 numpy);
@@ -283,8 +282,7 @@ class IVFPQSnapIndex(FreezableIndex):
             padded = np.zeros(self._pdim, dtype=np.float32)
             padded[: self.dim] = q_unit
             rot = rht(padded[None, :], self.seed)[0]
-            # Optimized: ~1.4x faster than np.linalg.norm() for 1D arrays
-            rot /= np.float32(np.sqrt(np.vdot(rot, rot))) + np.float32(1e-12)
+            rot /= np.float32(np.linalg.norm(rot)) + np.float32(1e-12)
             return cast("NDArray[np.float32]", rot)
         if self.use_opq and self._opq_rotation is not None:
             return cast(
@@ -588,7 +586,8 @@ class IVFPQSnapIndex(FreezableIndex):
             self._full_precision = self._full_precision[mask]
         counts = np.bincount(asn, minlength=self.nlist)
         self._offsets = np.concatenate([[0], np.cumsum(counts)]).astype(np.int64)
-        self._id_to_row = {v: i for i, v in enumerate(self._ids_by_row)}
+        # Optimized: Faster dictionary comprehension by pushing iteration to C layer.
+        self._id_to_row = dict(zip(self._ids_by_row, range(len(self._ids_by_row))))
         return True
 
     # ──────────────────────────────────────────────────────────────── #
@@ -711,8 +710,7 @@ class IVFPQSnapIndex(FreezableIndex):
         if len(self._ids_by_row) == 0:
             return []
         q = np.asarray(query, dtype=np.float32)
-        # Optimized: ~1.4x faster than np.linalg.norm() for 1D arrays
-        if float(np.sqrt(np.vdot(q, q))) < 1e-10:
+        if float(np.linalg.norm(q)) < 1e-10:
             return []
 
         filter_rows: NDArray[np.int64] | None = None
@@ -1304,7 +1302,6 @@ class IVFPQSnapIndex(FreezableIndex):
                     idx._ids_by_row.append(
                         _decode_id(f.read(ln).decode("utf-8"))
                     )
-                idx._id_to_row = {
-                    v: i for i, v in enumerate(idx._ids_by_row)
-                }
+                # Optimized: Faster dictionary comprehension by pushing iteration to C layer.
+                idx._id_to_row = dict(zip(idx._ids_by_row, range(len(idx._ids_by_row))))
         return idx

@@ -319,8 +319,8 @@ class SnapIndex(FreezableIndex):
         # 6. Append to storage arrays
         start = len(self._ids)
         self._ids.extend(ids)
-        for i, id_val in enumerate(ids):
-            self._id_to_pos[id_val] = start + i
+        # Optimized: Faster dictionary updates by pushing iteration to C layer.
+        self._id_to_pos.update(zip(ids, range(start, start + len(ids))))
 
         self._indices = (
             batch_idx
@@ -419,8 +419,7 @@ class SnapIndex(FreezableIndex):
             return []
 
         q = np.asarray(query, dtype=np.float32)
-        # Optimized: ~1.4x faster than np.linalg.norm() for 1D arrays
-        q_norm: float = float(np.sqrt(np.vdot(q, q)))
+        q_norm: float = float(np.linalg.norm(q))
         if q_norm < 1e-10:
             return []
 
