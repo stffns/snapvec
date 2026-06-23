@@ -89,7 +89,7 @@ def assign_l2(
 ) -> NDArray[np.int64]:
     """Hard-assign every row in X to its nearest centroid (squared L2)."""
     d2 = (X ** 2).sum(1, keepdims=True) - 2 * X @ C.T + (C ** 2).sum(1)[None, :]
-    return d2.argmin(1).astype(np.int64)
+    return cast("NDArray[np.int64]", d2.argmin(1))
 
 
 def probe_scores_l2_monotone(
