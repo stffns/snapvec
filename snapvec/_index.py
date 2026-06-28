@@ -591,14 +591,10 @@ class SnapIndex(FreezableIndex):
                 assert self._rnorms is not None
                 f.write(self._qjl.tobytes())
                 f.write(self._rnorms.tobytes())
-            # Optimized: batch writes to reduce system calls and CRC32 overhead
-            batch = bytearray()
-            pack = struct.pack
             for id_val in self._ids:
                 enc = str(id_val).encode("utf-8")
-                batch.extend(pack("<H", len(enc)))
-                batch.extend(enc)
-            f.write(batch)
+                f.write(struct.pack("<H", len(enc)))
+                f.write(enc)
 
         save_with_checksum_atomic(path, _write)
 

@@ -61,7 +61,7 @@ class ChecksumWriter:
         self._crc = 0
         self._finalised = False
 
-    def write(self, data: bytes | bytearray | memoryview) -> int:
+    def write(self, data: bytes) -> int:
         if self._finalised:
             raise RuntimeError(
                 "ChecksumWriter.write called after finalise(); the "
