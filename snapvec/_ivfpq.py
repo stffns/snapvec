@@ -1156,6 +1156,9 @@ class IVFPQSnapIndex(FreezableIndex):
                     f.write(self._norms.tobytes())
                 if self.keep_full_precision:
                     f.write(np.ascontiguousarray(self._full_precision).tobytes())
+                # Optimized: batch writes to reduce system calls and CRC32 overhead
+                batch = bytearray()
+                pack = struct.pack
                 for id_val in self._ids_by_row:
                     s = str(id_val).encode("utf-8")
                     if len(s) > _MAX_ID_BYTES:
@@ -1164,8 +1167,9 @@ class IVFPQSnapIndex(FreezableIndex):
                             f"the file format stores id length as uint16 "
                             f"(max {_MAX_ID_BYTES})"
                         )
-                    f.write(struct.pack("<H", len(s)))
-                    f.write(s)
+                    batch.extend(pack("<H", len(s)))
+                    batch.extend(s)
+                f.write(batch)
 
         save_with_checksum_atomic(path, _write)
 
