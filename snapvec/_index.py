@@ -319,8 +319,8 @@ class SnapIndex(FreezableIndex):
         # 6. Append to storage arrays
         start = len(self._ids)
         self._ids.extend(ids)
-        for i, id_val in enumerate(ids):
-            self._id_to_pos[id_val] = start + i
+        # Optimized: C-level dictionary update is faster than manual loop
+        self._id_to_pos.update(zip(ids, range(start, start + len(ids))))
 
         self._indices = (
             batch_idx
