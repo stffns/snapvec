@@ -598,7 +598,11 @@ class SnapIndex(FreezableIndex):
                     enc = str(id_val).encode("utf-8")
                     buf.extend(struct.pack("<H", len(enc)))
                     buf.extend(enc)
-                f.write(buf)
+                    if len(buf) >= 65536:
+                        f.write(buf)
+                        buf.clear()
+                if buf:
+                    f.write(buf)
 
         save_with_checksum_atomic(path, _write)
 

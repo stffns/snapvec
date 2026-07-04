@@ -458,7 +458,11 @@ class PQSnapIndex(FreezableIndex):
                             )
                         buf.extend(struct.pack("<H", len(s)))
                         buf.extend(s)
-                    f.write(buf)
+                        if len(buf) >= 65536:
+                            f.write(buf)
+                            buf.clear()
+                    if buf:
+                        f.write(buf)
 
         save_with_checksum_atomic(path, _write)
 

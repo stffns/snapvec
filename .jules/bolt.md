@@ -5,3 +5,11 @@
 ## 2024-05-18 - Batching small file writes for ChecksumWriter
 **Learning:** Batching multiple small file writes into a single `bytearray` before calling `f.write()` significantly improves serialization performance (approx. 1.4x speedup) in `SnapIndex.save` by reducing system call overhead and frequent `zlib.crc32` updates in the `ChecksumWriter` loop.
 **Action:** Always prefer batching small writes into a `bytearray` before writing to file when serializing index files to reduce overhead and improve write performance.
+
+## 2024-05-18 - Type annotations for bytearray in file writes
+**Learning:** When modifying file writing operations to use `bytearray` for performance batching in `ChecksumWriter`, ensure the type signature of the `write` method is updated to accept `typing.Union[bytes, bytearray]`. Avoid the `|` type union syntax (`bytes | bytearray`) to satisfy reviewer constraints regarding backward compatibility with Python 3.9, even if the project nominally requires Python >= 3.10.
+**Action:** Always prefer `typing.Union` over the `|` syntax for type unions unless specifically instructed otherwise by the reviewer.
+
+## 2024-05-18 - Bounded memory usage for batching writes
+**Learning:** While batching small file writes into a single `bytearray` before calling `f.write()` significantly improves serialization performance (approx. 1.4x speedup) in `SnapIndex.save`, unbounded batching can cause massive memory spikes. A chunked batching approach (e.g., writing every 64KB) is much safer and addresses reviewer concerns.
+**Action:** Always implement a max buffer size (like 64KB/65536 bytes) before writing to file when serializing index files to prevent OOM errors on massive datasets.
