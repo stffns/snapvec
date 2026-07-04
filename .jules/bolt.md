@@ -13,3 +13,7 @@
 ## 2024-05-18 - Bounded memory usage for batching writes
 **Learning:** While batching small file writes into a single `bytearray` before calling `f.write()` significantly improves serialization performance (approx. 1.4x speedup) in `SnapIndex.save`, unbounded batching can cause massive memory spikes. A chunked batching approach (e.g., writing every 64KB) is much safer and addresses reviewer concerns.
 **Action:** Always implement a max buffer size (like 64KB/65536 bytes) before writing to file when serializing index files to prevent OOM errors on massive datasets.
+
+## 2024-05-18 - CI version matching for static analysis
+**Learning:** Mypy errors indicating 'Type statement is only supported in Python 3.12 and greater' within `numpy/__init__.pyi` stem from a mismatch between the installed NumPy version (>=2.5.0) and mypy's `python_version` setting (e.g., '3.10') in `pyproject.toml`. This is an upstream environment configuration issue. To fix this in CI, align the `python-version` in the GitHub Actions workflow (e.g., `.github/workflows/ci.yml`) with the `mypy` `python_version`. Locally, bypass it by testing with the matched older Python version.
+**Action:** When diagnosing CI type-checking failures originating from third-party stubs, check if the CI's Python version matches the project's configured static typing version (e.g., mypy's `python_version`) before assuming the codebase needs modification.
