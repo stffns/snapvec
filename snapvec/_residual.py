@@ -175,8 +175,8 @@ class ResidualSnapIndex(FreezableIndex):
 
         start = len(self._ids)
         self._ids.extend(ids)
-        # Optimized: C-level dict update is faster than Python for-loop
-        self._id_to_pos.update(zip(ids, range(start, start + len(ids))))
+        for i, id_val in enumerate(ids):
+            self._id_to_pos[id_val] = start + i
 
         self._codes1 = c1 if len(self._codes1) == 0 else np.vstack([self._codes1, c1])
         self._codes2 = c2 if len(self._codes2) == 0 else np.vstack([self._codes2, c2])
@@ -358,6 +358,5 @@ class ResidualSnapIndex(FreezableIndex):
                 for _ in range(n):
                     (ln,) = struct.unpack("<H", f.read(2))
                     idx._ids.append(_decode_id(f.read(ln).decode("utf-8")))
-                # Optimized: C-level dict creation is faster than comprehension
-                idx._id_to_pos = dict(zip(idx._ids, range(len(idx._ids))))
+                idx._id_to_pos = {id_val: i for i, id_val in enumerate(idx._ids)}
         return idx
