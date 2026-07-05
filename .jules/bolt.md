@@ -1,3 +1,6 @@
 ## 2024-05-18 - Fast row-wise Euclidean norm in pure NumPy
 **Learning:** In performance-critical paths, computing the batch norm of a 2D array via `np.linalg.norm(arr, axis=1)` is relatively slow. Using `np.sqrt(np.einsum('ij,ij->i', arr, arr))` is significantly faster (~4x speedup on a laptop CPU for typical batch sizes). If `keepdims=True` behavior is needed, appending `[:, np.newaxis]` matches the original shape seamlessly.
 **Action:** Always prefer `np.sqrt(np.einsum('ij,ij->i', arr, arr))` over `np.linalg.norm(arr, axis=1)` when computing row-wise vector norms in NumPy to eliminate dispatch overhead and improve execution speed.
+## 2024-07-05 - Avoid dict.update(zip(...)) for performance optimization
+**Learning:** Despite some synthetic benchmarks, replacing Python-level `for` loops and dictionary comprehensions with `dict.update(zip(...))` or `dict(zip(...))` is considered a de-optimization in modern Python (3.10+). Bytecode optimizations (like `BUILD_MAP` and `MAP_ADD`) make comprehensions and loops faster than the overhead of creating, yielding, and unpacking intermediate tuple objects in memory required by `zip()`.
+**Action:** Avoid replacing dictionary comprehensions or `for enumerate` loops with `zip()` equivalents for the purpose of performance optimization.
