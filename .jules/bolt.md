@@ -4,3 +4,6 @@
 ## 2024-07-07 - Batching file writes for performance in Python
 **Learning:** Batching multiple small file writes into a single `bytearray` before calling `f.write()` significantly improves serialization performance (approx. 1.4x speedup) in `SnapIndex.save` by reducing system call overhead and frequent `zlib.crc32` updates in the `ChecksumWriter` loop. A chunked batching strategy (e.g., flushing at 64KB/65536 bytes) prevents unbounded memory usage.
 **Action:** Always consider using a `bytearray` buffer with chunked flushing (e.g., 64KB) when performing many small file writes, especially when computing checksums like `zlib.crc32` concurrently.
+## 2024-07-07 - mypy issues with modern NumPy
+**Learning:** Bumping `python_version = "3.12"` in `pyproject.toml` is required for modern `numpy>=2.5` because its type stubs use `type` statements. While fixing this, some `cast` calls may become redundant (like `d2.argmin(1)`), while other environments need them. Removing the redundant cast fixes `redundant-cast` errors under Python 3.12 type checking.
+**Action:** When bumping `python_version` in `mypy` config for modern numpy, also remove any `typing.cast` calls that `mypy` flags as `redundant-cast` to ensure linting passes.
