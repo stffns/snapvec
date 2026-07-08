@@ -303,7 +303,9 @@ class SnapIndex(FreezableIndex):
             reconstructed: NDArray[np.float32] = self._centroids[batch_idx]
             r_scaled: NDArray[np.float32] = scaled - reconstructed
             # sign(S·r_rot) = sign(S·r_scaled) — scale-invariant
-            S_r: NDArray[np.float32] = (self._S @ r_scaled.T).T
+            # Optimized: rewriting as r_scaled @ S.T avoids intermediate allocations
+            # and returns a C-contiguous array instead of an F-contiguous view
+            S_r: NDArray[np.float32] = r_scaled @ self._S.T
             qjl_signs = np.sign(S_r).astype(np.int8)
             qjl_signs[qjl_signs == 0] = 1
             # Store ‖r_rot‖ = ‖r_scaled‖/√pdim (unscaled space norm)
