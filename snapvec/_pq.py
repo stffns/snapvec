@@ -445,6 +445,7 @@ class PQSnapIndex(FreezableIndex):
                 f.write(np.ascontiguousarray(self._codes.T).tobytes())
                 if not self.normalized:
                     f.write(self._norms.tobytes())
+                buf = bytearray()
                 for id_val in self._ids:
                     s = str(id_val).encode("utf-8")
                     if len(s) > _MAX_ID_BYTES:
@@ -453,8 +454,13 @@ class PQSnapIndex(FreezableIndex):
                             f"the file format stores id length as uint16 "
                             f"(max {_MAX_ID_BYTES})"
                         )
-                    f.write(struct.pack("<H", len(s)))
-                    f.write(s)
+                    buf.extend(struct.pack("<H", len(s)))
+                    buf.extend(s)
+                    if len(buf) > 65536:
+                        f.write(buf)
+                        buf.clear()
+                if buf:
+                    f.write(buf)
 
         save_with_checksum_atomic(path, _write)
 

@@ -31,7 +31,7 @@ import struct
 import zlib
 from pathlib import Path
 from types import TracebackType
-from typing import IO, Callable
+from typing import IO, Callable, Union
 
 
 _TRAILER_MAGIC = b"CRC2"
@@ -61,7 +61,7 @@ class ChecksumWriter:
         self._crc = 0
         self._finalised = False
 
-    def write(self, data: bytes) -> int:
+    def write(self, data: Union[bytes, bytearray]) -> int:
         if self._finalised:
             raise RuntimeError(
                 "ChecksumWriter.write called after finalise(); the "
