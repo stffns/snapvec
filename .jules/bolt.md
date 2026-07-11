@@ -1,3 +1,6 @@
 ## 2024-05-18 - Fast row-wise Euclidean norm in pure NumPy
 **Learning:** In performance-critical paths, computing the batch norm of a 2D array via `np.linalg.norm(arr, axis=1)` is relatively slow. Using `np.sqrt(np.einsum('ij,ij->i', arr, arr))` is significantly faster (~4x speedup on a laptop CPU for typical batch sizes). If `keepdims=True` behavior is needed, appending `[:, np.newaxis]` matches the original shape seamlessly.
 **Action:** Always prefer `np.sqrt(np.einsum('ij,ij->i', arr, arr))` over `np.linalg.norm(arr, axis=1)` when computing row-wise vector norms in NumPy to eliminate dispatch overhead and improve execution speed.
+## 2024-05-24 - Batching file writes in ChecksumWriter
+**Learning:** Writing many small strings to a file sequentially introduces significant system call overhead and frequent `zlib.crc32` updates.
+**Action:** Use a `bytearray` buffer to chunk and batch writes (e.g., flushing at 64KB), which provides ~1.4x speedup for serialization.
