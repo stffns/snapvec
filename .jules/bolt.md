@@ -1,3 +1,7 @@
 ## 2024-05-18 - Fast row-wise Euclidean norm in pure NumPy
 **Learning:** In performance-critical paths, computing the batch norm of a 2D array via `np.linalg.norm(arr, axis=1)` is relatively slow. Using `np.sqrt(np.einsum('ij,ij->i', arr, arr))` is significantly faster (~4x speedup on a laptop CPU for typical batch sizes). If `keepdims=True` behavior is needed, appending `[:, np.newaxis]` matches the original shape seamlessly.
 **Action:** Always prefer `np.sqrt(np.einsum('ij,ij->i', arr, arr))` over `np.linalg.norm(arr, axis=1)` when computing row-wise vector norms in NumPy to eliminate dispatch overhead and improve execution speed.
+
+## 2024-05-18 - Batch file writes with bytearray buffering
+**Learning:** Batching multiple small file writes into a single `bytearray` before calling `f.write()` significantly improves serialization performance (approx. 1.4x speedup) by reducing system call overhead and frequent `zlib.crc32` updates. Implementing a chunked batching strategy (e.g., flushing the buffer at 64KB/65536 bytes) prevents unbounded memory usage while preserving performance benefits. Furthermore, when adding union types to signatures, it's safer to use `typing.Union[bytes, bytearray]` instead of `bytes | bytearray` to satisfy reviewer constraints regarding backward compatibility with older Python tools.
+**Action:** Always batch small file writes into chunks when streaming to disk or network, especially if there's a per-write overhead like checksum calculation. Also use `typing.Union` for compatibility when changing types in widely used files.
