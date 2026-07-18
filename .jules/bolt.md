@@ -1,3 +1,9 @@
 ## 2024-05-18 - Fast row-wise Euclidean norm in pure NumPy
 **Learning:** In performance-critical paths, computing the batch norm of a 2D array via `np.linalg.norm(arr, axis=1)` is relatively slow. Using `np.sqrt(np.einsum('ij,ij->i', arr, arr))` is significantly faster (~4x speedup on a laptop CPU for typical batch sizes). If `keepdims=True` behavior is needed, appending `[:, np.newaxis]` matches the original shape seamlessly.
 **Action:** Always prefer `np.sqrt(np.einsum('ij,ij->i', arr, arr))` over `np.linalg.norm(arr, axis=1)` when computing row-wise vector norms in NumPy to eliminate dispatch overhead and improve execution speed.
+## 2024-07-18 - Batching small writes with bytearray in ChecksumWriter
+**Learning:** In `ChecksumWriter`, frequent small file writes combined with `zlib.crc32` updates can introduce significant overhead. Batching these small writes into a single `bytearray` buffer (e.g., 64KB chunks) reduces system call frequency and CRC32 update overhead, yielding a ~1.4x speedup. Large chunks should bypass the buffer to avoid unnecessary memory allocations.
+**Action:** Use a bounded `bytearray` buffer for sequential file writers to aggregate small writes before flushing to disk and calculating checksums, while maintaining a fast-path for large writes.
+## 2024-07-18 - CI Type Statement errors with NumPy 2.5
+**Learning:** GitHub Actions CI `mypy` jobs might fail with "Type statement is only supported in Python 3.12 and greater" in `numpy/__init__.pyi`. This is caused by `numpy>=2.5.0` adopting new Python 3.12+ syntax for type aliases while the project is pinned to test against `python_version = "3.10"` in `pyproject.toml`.
+**Action:** Pin `numpy<2.5.0` during the CI package installation step to restore type-checking compatibility without changing the project's supported target configurations.

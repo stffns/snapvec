@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import os
 import struct
+import typing
 import zlib
 from pathlib import Path
 from types import TracebackType
@@ -60,21 +61,41 @@ class ChecksumWriter:
         self._f = f
         self._crc = 0
         self._finalised = False
+        self._buffer = bytearray()
+        self._buf_size = 65536
 
-    def write(self, data: bytes) -> int:
+    def write(self, data: typing.Union[bytes, bytearray]) -> int:
         if self._finalised:
             raise RuntimeError(
                 "ChecksumWriter.write called after finalise(); the "
                 "trailer has already been emitted."
             )
-        self._crc = zlib.crc32(data, self._crc)
-        return self._f.write(data)
+
+        data_len = len(data)
+        if data_len >= self._buf_size:
+            if self._buffer:
+                self.flush()
+            self._crc = zlib.crc32(data, self._crc)
+            return self._f.write(data)
+
+        self._buffer.extend(data)
+        if len(self._buffer) >= self._buf_size:
+            self.flush()
+
+        return data_len
+
+    def flush(self) -> None:
+        if self._buffer:
+            self._crc = zlib.crc32(self._buffer, self._crc)
+            self._f.write(self._buffer)
+            self._buffer.clear()
 
     def finalise(self) -> None:
         """Write the trailer.  Idempotent: a second call is a no-op
         instead of appending a second (corrupting) trailer."""
         if self._finalised:
             return
+        self.flush()
         self._f.write(_TRAILER_MAGIC)
         self._f.write(struct.pack("<I", self._crc & 0xFFFFFFFF))
         self._finalised = True
