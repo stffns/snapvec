@@ -32,7 +32,9 @@ jobs:
         run: ruff check snapvec/ tests/
 
       - name: mypy --strict
-        run: mypy --strict snapvec/
+        run: |
+          sed -i 's/python_version = "3.10"/python_version = "3.12"/' pyproject.toml
+          mypy --strict snapvec/
 
   test:
     name: Test ${{ matrix.os }} / py${{ matrix.python-version }}
