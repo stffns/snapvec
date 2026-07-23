@@ -1,3 +1,6 @@
 ## 2024-05-18 - Fast row-wise Euclidean norm in pure NumPy
 **Learning:** In performance-critical paths, computing the batch norm of a 2D array via `np.linalg.norm(arr, axis=1)` is relatively slow. Using `np.sqrt(np.einsum('ij,ij->i', arr, arr))` is significantly faster (~4x speedup on a laptop CPU for typical batch sizes). If `keepdims=True` behavior is needed, appending `[:, np.newaxis]` matches the original shape seamlessly.
 **Action:** Always prefer `np.sqrt(np.einsum('ij,ij->i', arr, arr))` over `np.linalg.norm(arr, axis=1)` when computing row-wise vector norms in NumPy to eliminate dispatch overhead and improve execution speed.
+## 2024-05-19 - Einsum is faster than explicitly computing row-wise sums of squared elements
+**Learning:** Similarly, when calculating just the squared row-wise norms, computing `(X ** 2).sum(1)` is slower than `np.einsum('ij,ij->i', X, X)` because the former creates intermediate arrays (like `X ** 2`), leading to memory allocations and copy overheads. Replacing explicit powers and `.sum()` with `einsum` avoids this and speeds up encoding and searching.
+**Action:** Use `np.einsum` for squared Euclidean norms as well, and if computing 3D row norms, use `np.einsum('ijk,ijk->ij', X, X)`.
