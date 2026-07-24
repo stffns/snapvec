@@ -171,6 +171,7 @@ class TestPersistence:
         path, then re-pack into the new tight RAM layout.
         """
         import struct
+
         from snapvec._index import _MAGIC
 
         idx = SnapIndex(dim=128, bits=3)
@@ -212,7 +213,8 @@ class TestPersistence:
         corrupt the prod correction term).
         """
         import struct
-        from snapvec._index import _MAGIC, _FLAG_PROD
+
+        from snapvec._index import _FLAG_PROD, _MAGIC
 
         # Real v3 prod-mode index to source the reference indices + payload.
         idx = SnapIndex(dim=128, bits=4, use_prod=True)
@@ -473,7 +475,7 @@ class TestFilterIds:
         idx = SnapIndex(dim=DIM, bits=4)
         idx.add_batch(list(range(100)), vecs)
 
-        allowed = set(range(0, 50))
+        allowed = set(range(50))
         results = idx.search(vecs[0], k=10, filter_ids=allowed)
         assert all(r[0] in allowed for r in results)
 
