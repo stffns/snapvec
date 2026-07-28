@@ -4,11 +4,9 @@ The real module is built from Cython and does not ship a ``.pyi``
 from the compiler; this stub lets ``mypy --strict`` see the same
 Python-level shapes the Cython kernels expose to callers.
 """
-from __future__ import annotations
 
 import numpy as np
 from numpy.typing import NDArray
-
 
 def adc_colmajor(
     lut: NDArray[np.float32],
