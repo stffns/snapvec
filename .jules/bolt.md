@@ -7,3 +7,6 @@
 ## 2026-07-29 - Unused Imports and Dict Comprehension Rewrite in Tests
 **Learning:** The CI `Lint (ruff + mypy)` failed due to unused variables and unnecessary `dict()` calls used instead of literal syntax in test parameterizations (`test_file_format.py`).
 **Action:** Let Ruff automatically sort imports and replaced `dict(dim=32, bits=4)` with literals `{"dim": 32, "bits": 4}` for parameterizations using `ruff check --fix --unsafe-fixes`. Also, applied the `with` open single line rewrite in `_file_format.py` manually as Ruff didn't apply `--unsafe-fixes` to it successfully.
+## 2026-07-29 - Mypy syntax errors with numpy 2.5.0 and python 3.10
+**Learning:** In the GitHub CI `lint` job running on Python 3.12 with mypy configured for `python_version = "3.10"` (in pyproject.toml), `numpy>=2.5.0` introduced new syntax (`Type` statement) in its type stubs that causes mypy to crash with a syntax error because it targets 3.10 parsing rules.
+**Action:** Pinned `numpy<2.5.0` in the `Install dev dependencies` step of the `lint` job within `.github/workflows/ci.yml`. This preserves the intended python 3.10 type inference target while avoiding the upstream stub incompatibility, as per the codebase directives.
