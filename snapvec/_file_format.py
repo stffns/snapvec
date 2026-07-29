@@ -35,6 +35,8 @@ from pathlib import Path
 from types import TracebackType
 from typing import IO
 
+from typing_extensions import Self
+
 _TRAILER_MAGIC = b"CRC2"
 _TRAILER_SIZE = 8  # 4 bytes magic + 4 bytes uint32 CRC
 
@@ -98,7 +100,7 @@ class ChecksumWriter:
         self._f.write(struct.pack("<I", self._crc & 0xFFFFFFFF))
         self._finalised = True
 
-    def __enter__(self) -> ChecksumWriter:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(
@@ -181,16 +183,14 @@ def save_with_checksum_atomic(
     the trailer + atomic rename.
     """
     path = Path(path)
-    tmp_file = tempfile.NamedTemporaryFile(dir=path.parent, delete=False)
-    tmp_path = Path(tmp_file.name)
-    tmp_file.close()
-
     try:
+        with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as tmp_file:
+            tmp_path = Path(tmp_file.name)
         with open(tmp_path, "wb") as raw, ChecksumWriter(raw) as cw:
             writer_fn(cw)
         os.replace(tmp_path, path)
     finally:
-        if tmp_path.exists():
+        if 'tmp_path' in locals() and tmp_path.exists():
             tmp_path.unlink()
 
 

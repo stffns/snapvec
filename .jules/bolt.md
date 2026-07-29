@@ -4,3 +4,6 @@
 ## 2025-02-18 - Batching file writes with bytearray
 **Learning:** In `ChecksumWriter`, frequent small file writes and `zlib.crc32` updates caused significant overhead during serialization (`SnapIndex.save`).
 **Action:** Implemented a chunked batching strategy using `bytearray` (flushing at 64KB) in `ChecksumWriter`. Large incoming chunks bypass the buffer. This reduces system calls and frequent CRC updates, yielding approximately a 1.4x speedup. Updated `save_with_checksum_atomic` to securely use `tempfile.NamedTemporaryFile(delete=False)` with a `try...finally` block to prevent lingering files on exceptions.
+## 2026-07-29 - Unused Imports and Dict Comprehension Rewrite in Tests
+**Learning:** The CI `Lint (ruff + mypy)` failed due to unused variables and unnecessary `dict()` calls used instead of literal syntax in test parameterizations (`test_file_format.py`).
+**Action:** Let Ruff automatically sort imports and replaced `dict(dim=32, bits=4)` with literals `{"dim": 32, "bits": 4}` for parameterizations using `ruff check --fix --unsafe-fixes`. Also, applied the `with` open single line rewrite in `_file_format.py` manually as Ruff didn't apply `--unsafe-fixes` to it successfully.
