@@ -199,9 +199,9 @@ def fit_opq_rotation(
 
 
 __all__ = [
-    "kmeans_pp_init",
-    "kmeans_mse",
     "assign_l2",
-    "probe_scores_l2_monotone",
     "fit_opq_rotation",
+    "kmeans_mse",
+    "kmeans_pp_init",
+    "probe_scores_l2_monotone",
 ]
