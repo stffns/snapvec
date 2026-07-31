@@ -34,6 +34,8 @@ from pathlib import Path
 from types import TracebackType
 from typing import IO
 
+from typing_extensions import Self
+
 _TRAILER_MAGIC = b"CRC2"
 _TRAILER_SIZE = 8  # 4 bytes magic + 4 bytes uint32 CRC
 
@@ -79,7 +81,7 @@ class ChecksumWriter:
         self._f.write(struct.pack("<I", self._crc & 0xFFFFFFFF))
         self._finalised = True
 
-    def __enter__(self) -> ChecksumWriter:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(
