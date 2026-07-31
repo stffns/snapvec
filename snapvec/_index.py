@@ -581,7 +581,7 @@ class SnapIndex(FreezableIndex):
         else:
             packed = _pack(self._indices, self._mse_bits)
 
-        def _write(f: "ChecksumWriter") -> None:
+        def _write(f: ChecksumWriter) -> None:
             f.write(_MAGIC)
             f.write(struct.pack("<IIIIII", _VERSION, self.dim, self.bits, self.seed, n, flags))
             f.write(struct.pack("<I", len(packed)))
@@ -599,7 +599,7 @@ class SnapIndex(FreezableIndex):
         save_with_checksum_atomic(path, _write)
 
     @classmethod
-    def load(cls, path: str | Path) -> "SnapIndex":
+    def load(cls, path: str | Path) -> SnapIndex:
         """Load index from a ``.snpv`` file.
 
         Supports v1 (mse-only legacy) and v2 (prod/flags) formats.
