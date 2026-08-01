@@ -21,11 +21,11 @@ from ._rotation import padded_dim, rht
 
 __version__ = "0.11.1"
 __all__ = [
-    "SnapIndex",
-    "PQSnapIndex",
     "IVFPQSnapIndex",
+    "PQSnapIndex",
     "ResidualSnapIndex",
+    "SnapIndex",
     "get_codebook",
-    "rht",
     "padded_dim",
+    "rht",
 ]

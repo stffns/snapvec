@@ -308,9 +308,9 @@ class PQSnapIndex(FreezableIndex):
         for j in range(self.M):
             Xj = pre[:, j * self._d_sub : (j + 1) * self._d_sub]
             d2 = (
-                np.einsum('ij,ij->i', Xj, Xj)[:, None]
+                (Xj ** 2).sum(1, keepdims=True)
                 - 2 * Xj @ self._codebooks[j].T
-                + np.einsum('ij,ij->i', self._codebooks[j], self._codebooks[j])[None, :]
+                + (self._codebooks[j] ** 2).sum(1)[None, :]
             )
             codes[j] = d2.argmin(1).astype(np.uint8)
 
@@ -426,7 +426,7 @@ class PQSnapIndex(FreezableIndex):
             flags |= _FLAG_USE_OPQ
         n = len(self._ids)
 
-        def _write(f: "ChecksumWriter") -> None:
+        def _write(f: ChecksumWriter) -> None:
             f.write(_MAGIC)
             f.write(
                 struct.pack(
@@ -459,7 +459,7 @@ class PQSnapIndex(FreezableIndex):
         save_with_checksum_atomic(path, _write)
 
     @classmethod
-    def load(cls, path: str | Path) -> "PQSnapIndex":
+    def load(cls, path: str | Path) -> PQSnapIndex:
         path = Path(path)
         verify_checksum(path)  # no-op for legacy files without a trailer
         with open(path, "rb") as f:

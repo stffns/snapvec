@@ -429,7 +429,7 @@ class IVFPQSnapIndex(FreezableIndex):
             if self.keep_full_precision else
             np.empty((0, self._pdim), dtype=np.float16)
         )
-        cb_norms = np.einsum('ijk,ijk->ij', self._codebooks, self._codebooks)             # (M, K)
+        cb_norms = (self._codebooks ** 2).sum(2)             # (M, K)
         cb_T = np.transpose(self._codebooks, (0, 2, 1))      # (M, d_sub, K)
         for start in range(0, n, self._ENCODE_CHUNK):
             end = min(start + self._ENCODE_CHUNK, n)
@@ -1127,7 +1127,7 @@ class IVFPQSnapIndex(FreezableIndex):
             flags |= _FLAG_USE_OPQ
         n = len(self._ids_by_row)
 
-        def _write(f: "ChecksumWriter") -> None:
+        def _write(f: ChecksumWriter) -> None:
             f.write(_MAGIC)
             f.write(
                 struct.pack(
@@ -1170,7 +1170,7 @@ class IVFPQSnapIndex(FreezableIndex):
         save_with_checksum_atomic(path, _write)
 
     @classmethod
-    def load(cls, path: str | Path) -> "IVFPQSnapIndex":
+    def load(cls, path: str | Path) -> IVFPQSnapIndex:
         path = Path(path)
         verify_checksum(path)  # no-op for legacy files without a trailer
         with open(path, "rb") as f:
