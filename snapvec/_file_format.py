@@ -32,7 +32,11 @@ import zlib
 from collections.abc import Callable
 from pathlib import Path
 from types import TracebackType
-from typing import IO, Self
+from typing import IO, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from typing_extensions import Self
+
 
 _TRAILER_MAGIC = b"CRC2"
 _TRAILER_SIZE = 8  # 4 bytes magic + 4 bytes uint32 CRC
