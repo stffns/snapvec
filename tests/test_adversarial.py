@@ -11,7 +11,6 @@ import pytest
 
 from snapvec import IVFPQSnapIndex, PQSnapIndex, ResidualSnapIndex, SnapIndex
 
-
 # --------------------------------------------------------------------------- #
 # Empty index                                                                  #
 # --------------------------------------------------------------------------- #
