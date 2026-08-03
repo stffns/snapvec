@@ -426,7 +426,7 @@ class PQSnapIndex(FreezableIndex):
             flags |= _FLAG_USE_OPQ
         n = len(self._ids)
 
-        def _write(f: "ChecksumWriter") -> None:
+        def _write(f: ChecksumWriter) -> None:
             f.write(_MAGIC)
             f.write(
                 struct.pack(
@@ -459,7 +459,7 @@ class PQSnapIndex(FreezableIndex):
         save_with_checksum_atomic(path, _write)
 
     @classmethod
-    def load(cls, path: str | Path) -> "PQSnapIndex":
+    def load(cls, path: str | Path) -> PQSnapIndex:
         path = Path(path)
         verify_checksum(path)  # no-op for legacy files without a trailer
         with open(path, "rb") as f:
