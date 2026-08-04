@@ -34,7 +34,10 @@ from pathlib import Path
 from types import TracebackType
 from typing import IO
 
-from typing_extensions import Self
+try:
+    from typing import Self
+except ImportError:
+    from typing_extensions import Self
 
 _TRAILER_MAGIC = b"CRC2"
 _TRAILER_SIZE = 8  # 4 bytes magic + 4 bytes uint32 CRC
