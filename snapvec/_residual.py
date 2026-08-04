@@ -35,7 +35,6 @@ from ._file_format import ChecksumWriter, save_with_checksum_atomic, verify_chec
 from ._freezable import FreezableIndex
 from ._rotation import padded_dim, rht
 
-
 _MAX_ID_BYTES = 0xFFFF  # file format stores id length as uint16
 
 
@@ -295,7 +294,7 @@ class ResidualSnapIndex(FreezableIndex):
             flags |= 1
         n = len(self._ids)
 
-        def _write(f: "ChecksumWriter") -> None:
+        def _write(f: ChecksumWriter) -> None:
             f.write(_MAGIC)
             f.write(struct.pack("<IIIIIIII", _VERSION, self.dim, self.b1,
                                 self.b2, self.seed, n, flags, self._pdim))
@@ -318,7 +317,7 @@ class ResidualSnapIndex(FreezableIndex):
         save_with_checksum_atomic(path, _write)
 
     @classmethod
-    def load(cls, path: str | Path) -> "ResidualSnapIndex":
+    def load(cls, path: str | Path) -> ResidualSnapIndex:
         path = Path(path)
         verify_checksum(path)  # no-op for legacy files without a trailer
         with open(path, "rb") as f:
