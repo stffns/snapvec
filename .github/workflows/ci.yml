@@ -27,6 +27,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
+          pip install "numpy<2.5.0"
 
       - name: ruff check
         run: ruff check snapvec/ tests/
@@ -61,6 +62,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
+          pip install "numpy<2.5.0"
 
       - name: Run tests
         run: pytest -q --cov=snapvec --cov-report=term-missing
