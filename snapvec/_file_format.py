@@ -29,10 +29,10 @@ from __future__ import annotations
 import os
 import struct
 import zlib
+from collections.abc import Callable
 from pathlib import Path
 from types import TracebackType
-from typing import IO, Callable
-
+from typing import IO
 
 _TRAILER_MAGIC = b"CRC2"
 _TRAILER_SIZE = 8  # 4 bytes magic + 4 bytes uint32 CRC
@@ -163,16 +163,15 @@ def save_with_checksum_atomic(
     """
     path = Path(path)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    with open(tmp, "wb") as raw:
-        with ChecksumWriter(raw) as cw:
-            writer_fn(cw)
+    with open(tmp, "wb") as raw, ChecksumWriter(raw) as cw:
+        writer_fn(cw)
     os.replace(tmp, path)
 
 
 __all__ = [
     "ChecksumWriter",
     "has_trailer",
-    "verify_checksum",
-    "trailer_len",
     "save_with_checksum_atomic",
+    "trailer_len",
+    "verify_checksum",
 ]
