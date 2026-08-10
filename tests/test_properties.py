@@ -16,7 +16,6 @@ from numpy.typing import NDArray
 
 from snapvec import IVFPQSnapIndex, PQSnapIndex, SnapIndex
 
-
 PROFILE = settings(
     max_examples=25,
     deadline=None,

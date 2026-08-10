@@ -150,8 +150,8 @@ def test_truncated_trailer_falls_back_to_legacy_mode(tmp_path: Path) -> None:
 # ──────────────────────────────────────────────────────────────────── #
 
 @pytest.mark.parametrize("index_cls, ctor_kwargs, suffix", [
-    (SnapIndex,          dict(dim=32, bits=4, normalized=True),           ".snpv"),
-    (ResidualSnapIndex,  dict(dim=32, b1=3, b2=3, normalized=True),       ".snpr"),
+    (SnapIndex,          {"dim": 32, "bits": 4, "normalized": True},           ".snpv"),
+    (ResidualSnapIndex,  {"dim": 32, "b1": 3, "b2": 3, "normalized": True},       ".snpr"),
 ])
 def test_trailing_crc_roundtrip_trainingfree(
     index_cls, ctor_kwargs, suffix, tmp_path,
