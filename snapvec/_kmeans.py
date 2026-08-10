@@ -89,7 +89,7 @@ def assign_l2(
 ) -> NDArray[np.int64]:
     """Hard-assign every row in X to its nearest centroid (squared L2)."""
     d2 = (X ** 2).sum(1, keepdims=True) - 2 * X @ C.T + (C ** 2).sum(1)[None, :]
-    return cast("NDArray[np.int64]", d2.argmin(1))
+    return cast("NDArray[np.int64]", d2.argmin(1))  # type: ignore[redundant-cast]
 
 
 def probe_scores_l2_monotone(
@@ -199,9 +199,9 @@ def fit_opq_rotation(
 
 
 __all__ = [
-    "kmeans_pp_init",
-    "kmeans_mse",
     "assign_l2",
-    "probe_scores_l2_monotone",
     "fit_opq_rotation",
+    "kmeans_mse",
+    "kmeans_pp_init",
+    "probe_scores_l2_monotone",
 ]
