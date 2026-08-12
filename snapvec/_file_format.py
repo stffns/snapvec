@@ -79,7 +79,7 @@ class ChecksumWriter:
         self._f.write(struct.pack("<I", self._crc & 0xFFFFFFFF))
         self._finalised = True
 
-    def __enter__(self) -> "ChecksumWriter":
+    def __enter__(self) -> ChecksumWriter:
         return self
 
     def __exit__(
