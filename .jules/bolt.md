@@ -1,3 +1,6 @@
 ## 2024-05-18 - Fast row-wise Euclidean norm in pure NumPy
 **Learning:** In performance-critical paths, computing the batch norm of a 2D array via `np.linalg.norm(arr, axis=1)` is relatively slow. Using `np.sqrt(np.einsum('ij,ij->i', arr, arr))` is significantly faster (~4x speedup on a laptop CPU for typical batch sizes). If `keepdims=True` behavior is needed, appending `[:, np.newaxis]` matches the original shape seamlessly.
 **Action:** Always prefer `np.sqrt(np.einsum('ij,ij->i', arr, arr))` over `np.linalg.norm(arr, axis=1)` when computing row-wise vector norms in NumPy to eliminate dispatch overhead and improve execution speed.
+## 2024-08-13 - Fast computing array squared difference and last axis batch norms
+**Learning:** To compute array squared differences along an axis avoiding redundant arrays: `diff = X - c; np.einsum('ij,ij->i', diff, diff)` is much faster than `((X - c)**2).sum(1)`. For 3D arrays to calculate last axis batch norms, `np.einsum('ijk,ijk->ij', X, X)` prevents large intermediate array allocations and is faster than `(X**2).sum(2)`.
+**Action:** Use `np.einsum` to avoid computing large intermediate arrays when finding Euclidean squared norms or squared differences instead of squaring and explicitly summing along an axis.
